@@ -1,0 +1,167 @@
+import sys
+import os
+import shutil
+from pathlib import Path
+from pydantic import ValidationError
+
+# Add project root to path
+sys.path.append("d:/hospital-ai")
+
+from database.excel_manager import ExcelManager
+from services.availability_service import AvailabilityService
+from services.booking_service import BookingService
+from services.appointment_service import AppointmentService
+from models.appointment import AppointmentCreate, AppointmentReschedule
+from config import EXCEL_DB_PATH
+
+def test_appointment_service():
+    original_db = EXCEL_DB_PATH
+    test_db = original_db.parent / "hospital_data_test_appt_service.xlsx"
+
+    print(f"Original DB Path: {original_db}")
+    print(f"Test DB Path: {test_db}")
+
+    shutil.copy2(original_db, test_db)
+    print("Copied database to test database file.")
+
+    try:
+        manager = ExcelManager(file_path=str(test_db))
+        avail = AvailabilityService(excel_manager=manager)
+        book_service = BookingService(excel_manager=manager, availability_service=avail)
+        appt_service = AppointmentService(excel_manager=manager, availability_service=avail)
+
+        # 1. Test Pydantic Validations
+        print("\n--- 1. Testing Pydantic Model Validations ---")
+        # Correct Create Schema
+        valid_create = {
+            "patient_name": "Bob",
+            "mobile": "1234567890",
+            "doctor_name": "Dr. Rajesh Kumar",
+            "date": "2026-08-03",
+            "time": "09:00"
+        }
+        create_model = AppointmentCreate(**valid_create)
+        print("Pydantic valid model check passed:", create_model)
+
+        # Invalid Date Create Schema
+        invalid_create = valid_create.copy()
+        invalid_create["date"] = "03/08/2026" # wrong format
+        try:
+            AppointmentCreate(**invalid_create)
+            assert False, "Should have failed date validation!"
+        except ValidationError as e:
+            print("Successfully caught invalid date validation!")
+
+        # 2. Test Cancellation
+        print("\n--- 2. Testing Cancellation ---")
+        # First book an appointment
+        book_res = book_service.book_appointment(valid_create)
+        assert book_res["success"] is True
+        appt_id = book_res["appointment_id"]
+        print(f"Booked appointment for cancellation: {appt_id}")
+
+        # Cancel it
+        cancel_res = appt_service.cancel_appointment(appt_id)
+        print("Cancellation response:", cancel_res)
+        assert cancel_res["success"] is True
+
+        # Verify Excel fields
+        cancelled_appt = manager.get_appointment_by_id(appt_id)
+        print("Cancelled Appointment Detail:", cancelled_appt)
+        assert cancelled_appt["Status"] == "Cancelled"
+        assert cancelled_appt["Cancelled At"] is not None
+        assert cancelled_appt["Patient Name"] == "Bob"  # preserved fields
+
+        # Cancel again (should fail)
+        cancel_dup = appt_service.cancel_appointment(appt_id)
+        print("Cancellation duplicate response:", cancel_dup)
+        assert cancel_dup["success"] is False
+        assert "already cancelled" in cancel_dup["message"]
+
+        # Cancel non-existent ID
+        cancel_fake = appt_service.cancel_appointment("APT-FAKE-001")
+        print("Cancellation fake ID response:", cancel_fake)
+        assert cancel_fake["success"] is False
+        assert "not found" in cancel_fake["message"]
+
+        # 3. Test Rescheduling
+        print("\n--- 3. Testing Rescheduling ---")
+        # Book another appointment
+        valid_create_2 = {
+            "patient_name": "Alice",
+            "mobile": "9999999999",
+            "doctor_name": "Dr. Rajesh Kumar",
+            "date": "2026-08-03",
+            "time": "10:30"
+        }
+        book_res_2 = book_service.book_appointment(valid_create_2)
+        assert book_res_2["success"] is True
+        appt_id_2 = book_res_2["appointment_id"]
+        print(f"Booked appointment for rescheduling: {appt_id_2}")
+
+        # Reschedule it to 11:30 (free slot)
+        resched_res = appt_service.reschedule_appointment(appt_id_2, "2026-08-03", "11:30")
+        print("Reschedule success response:", resched_res)
+        assert resched_res["success"] is True
+
+        # Verify Excel details
+        resched_appt = manager.get_appointment_by_id(appt_id_2)
+        print("Rescheduled Appointment Detail:", resched_appt)
+        assert resched_appt["Status"] == "Rescheduled"
+        assert resched_appt["Date"] == "2026-08-03"
+        assert resched_appt["Time"] == "11:30"
+        assert resched_appt["Updated At"] is not None
+
+        # Reschedule to a booked slot (try to reschedule Alice to Bob's 10:00 booked slot - wait Bob was at 09:00, let's book someone else at 10:00 first)
+        book_service.book_appointment({
+            "patient_name": "Charlie",
+            "mobile": "7777777777",
+            "doctor_name": "Dr. Rajesh Kumar",
+            "date": "2026-08-03",
+            "time": "10:00"
+        })
+        # Try to reschedule Alice to 10:00 (booked by Charlie)
+        resched_fail = appt_service.reschedule_appointment(appt_id_2, "2026-08-03", "10:00")
+        print("Reschedule to booked slot response:", resched_fail)
+        assert resched_fail["success"] is False
+        assert "unavailable" in resched_fail["message"]
+        assert "10:00" not in resched_fail["available_slots"]
+
+        # Try to reschedule cancelled Bob
+        resched_cancelled = appt_service.reschedule_appointment(appt_id, "2026-08-03", "12:00")
+        print("Reschedule cancelled appointment response:", resched_cancelled)
+        assert resched_cancelled["success"] is False
+        assert "Cannot reschedule" in resched_cancelled["message"]
+
+        # 4. Test Lookups
+        print("\n--- 4. Testing Lookups (Appointment Status) ---")
+        # Lookup by ID
+        lookup_id_res = appt_service.get_appointment_status(appointment_id=appt_id_2)
+        print("Lookup by ID response:", lookup_id_res)
+        assert lookup_id_res["success"] is True
+        assert len(lookup_id_res["appointments"]) == 1
+        assert lookup_id_res["appointments"][0]["Patient Name"] == "Alice"
+
+        # Lookup by Mobile (Alice mobile: 9999999999)
+        lookup_mob_res = appt_service.get_appointment_status(mobile="9999999999")
+        print("Lookup by Mobile response:")
+        for a in lookup_mob_res["appointments"]:
+            print(a)
+        assert lookup_mob_res["success"] is True
+        assert len(lookup_mob_res["appointments"]) == 1
+        assert lookup_mob_res["appointments"][0]["Patient Name"] == "Alice"
+
+        # Lookup by fake Mobile
+        lookup_fake_mob = appt_service.get_appointment_status(mobile="0000000000")
+        print("Lookup by fake Mobile response:", lookup_fake_mob)
+        assert lookup_fake_mob["success"] is False
+
+        print("\nAll AppointmentService integration tests passed successfully!")
+
+    finally:
+        if os.path.exists(test_db):
+            os.remove(test_db)
+            print("\nRemoved test database file.")
+
+if __name__ == "__main__":
+    test_appointment_service()

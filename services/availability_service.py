@@ -1,0 +1,198 @@
+import logging
+from datetime import datetime, date, timedelta
+from typing import List, Dict, Any, Optional
+from database.excel_manager import ExcelManager
+
+# Setup logging
+logger = logging.getLogger(__name__)
+
+DAYS_MAP = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6
+}
+
+class AvailabilityService:
+    def __init__(self, excel_manager: Optional[ExcelManager] = None):
+        self.db = excel_manager or ExcelManager()
+
+    def parse_available_days(self, days_str: str) -> List[int]:
+        """
+        Parses available days string from Excel (e.g. "Mon,Tue,Wed,Fri" or "Mon-Sat")
+        into a list of weekday integers (0 = Mon, ..., 6 = Sun).
+        """
+        if not days_str or not isinstance(days_str, str):
+            return []
+        
+        days_str = days_str.strip()
+        available_days = set()
+
+        # Handle ranges like Mon-Sat
+        if "-" in days_str:
+            parts = days_str.split("-")
+            if len(parts) == 2:
+                start_day = parts[0].strip()[:3].lower()
+                end_day = parts[1].strip()[:3].lower()
+                if start_day in DAYS_MAP and end_day in DAYS_MAP:
+                    start_idx = DAYS_MAP[start_day]
+                    end_idx = DAYS_MAP[end_day]
+                    if start_idx <= end_idx:
+                        for i in range(start_idx, end_idx + 1):
+                            available_days.add(i)
+                    else:
+                        # Handle wrapping range (e.g. Sat-Tue)
+                        for i in range(start_idx, 7):
+                            available_days.add(i)
+                        for i in range(0, end_idx + 1):
+                            available_days.add(i)
+
+        # Handle comma-separated list like Mon,Tue,Wed,Fri
+        elif "," in days_str:
+            parts = days_str.split(",")
+            for p in parts:
+                d = p.strip()[:3].lower()
+                if d in DAYS_MAP:
+                    available_days.add(DAYS_MAP[d])
+        else:
+            # Single day
+            d = days_str.strip()[:3].lower()
+            if d in DAYS_MAP:
+                available_days.add(DAYS_MAP[d])
+
+        return sorted(list(available_days))
+
+    def is_doctor_available_on_date(self, doctor: Dict[str, Any], check_date: date) -> bool:
+        """Checks if a doctor works on the day of the week for the given date."""
+        available_days = self.parse_available_days(doctor.get("Available Days", ""))
+        return check_date.weekday() in available_days
+
+    def generate_slots(self, start_time_str: str, end_time_str: str, slot_duration: int) -> List[str]:
+        """Generates time slot start times (e.g., ['09:00', '09:30', ...])."""
+        slots = []
+        try:
+            start_parts = start_time_str.split(":")
+            end_parts = end_time_str.split(":")
+            
+            start_dt = datetime.strptime(f"{start_parts[0].zfill(2)}:{start_parts[1].zfill(2)}", "%H:%M")
+            end_dt = datetime.strptime(f"{end_parts[0].zfill(2)}:{end_parts[1].zfill(2)}", "%H:%M")
+            
+            current_dt = start_dt
+            while current_dt + timedelta(minutes=slot_duration) <= end_dt:
+                slots.append(current_dt.strftime("%H:%M"))
+                current_dt += timedelta(minutes=slot_duration)
+        except Exception as e:
+            logger.error(f"Error generating slots: {e}")
+        return slots
+
+    def normalize_time(self, time_str: str) -> str:
+        """Normalizes times to HH:MM format."""
+        if not time_str:
+            return ""
+        parts = str(time_str).split(":")
+        if len(parts) >= 2:
+            return f"{parts[0].zfill(2)}:{parts[1].zfill(2)}"
+        return time_str
+
+    def get_available_slots(self, doctor_id: str, date_str: str) -> Dict[str, Any]:
+        """
+        Gets available slots for a doctor on a specific date.
+        If the doctor is not working or has no slots, suggests next available date.
+        """
+        doctor = self.db.get_doctor_by_id(doctor_id)
+        if not doctor:
+            return {"status": "error", "message": f"Doctor with ID {doctor_id} not found"}
+
+        try:
+            check_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return {"status": "error", "message": f"Invalid date format: {date_str}. Use YYYY-MM-DD"}
+
+        # Check if doctor works on this weekday
+        if not self.is_doctor_available_on_date(doctor, check_date):
+            next_date = self.get_next_available_date(doctor, check_date)
+            return {
+                "status": "unavailable",
+                "message": f"{doctor['Doctor Name']} is not available on {date_str} ({check_date.strftime('%A')}).",
+                "next_available_date": next_date.strftime("%Y-%m-%d") if next_date else None,
+                "slots": []
+            }
+
+        # Generate all slots for the doctor
+        start_time = doctor.get("Start Time", "09:00")
+        end_time = doctor.get("End Time", "17:00")
+        duration = doctor.get("Slot Duration", 30)
+        
+        all_slots = self.generate_slots(start_time, end_time, duration)
+
+        # Get booked slots
+        appointments = self.db.get_appointments()
+        booked_times = set()
+        for appt in appointments:
+            appt_doc_id = str(appt.get("Doctor ID", "")).strip().lower()
+            appt_date = str(appt.get("Date", "")).strip()
+            appt_status = str(appt.get("Status", "")).strip().lower()
+            
+            if appt_doc_id == str(doctor_id).lower() and appt_date == date_str and appt_status != "cancelled":
+                booked_time = self.normalize_time(appt.get("Time", ""))
+                if booked_time:
+                    booked_times.add(booked_time)
+
+        # Build list of slots with availability details
+        slots_availability = []
+        available_slots_only = []
+        for slot in all_slots:
+            is_available = slot not in booked_times
+            slots_availability.append({
+                "time": slot,
+                "available": is_available
+            })
+            if is_available:
+                available_slots_only.append(slot)
+
+        if not available_slots_only:
+            # Doctor is working but fully booked, search next available date
+            next_date = self.get_next_available_date(doctor, check_date + timedelta(days=1))
+            return {
+                "status": "fully_booked",
+                "message": f"{doctor['Doctor Name']} is fully booked on {date_str}.",
+                "next_available_date": next_date.strftime("%Y-%m-%d") if next_date else None,
+                "slots": slots_availability
+            }
+
+        return {
+            "status": "available",
+            "doctor_name": doctor["Doctor Name"],
+            "date": date_str,
+            "slots": slots_availability,
+            "available_slots": available_slots_only
+        }
+
+    def get_next_available_date(self, doctor: Dict[str, Any], start_date: date) -> Optional[date]:
+        """Finds the next date (within 14 days) on which the doctor has at least one free slot."""
+        available_weekdays = self.parse_available_days(doctor.get("Available Days", ""))
+        if not available_weekdays:
+            return None
+
+        start_time = doctor.get("Start Time", "09:00")
+        end_time = doctor.get("End Time", "17:00")
+        duration = doctor.get("Slot Duration", 30)
+        all_slots = self.generate_slots(start_time, end_time, duration)
+        if not all_slots:
+            return None
+
+        appointments = self.db.get_appointments()
+
+        # Check up to 14 days in the future
+        for i in range(0, 15):
+            current_date = start_date + timedelta(days=i)
+            if current_date.weekday() in available_weekdays:
+                date_str = current_date.strftime("%Y-%m-%d")
+                booked_count = sum(
+                    1 for appt in appointments
+                    if str(appt.get("Doctor ID", "")).strip().lower() == str(doctor["Doctor ID"]).lower()
+                    and str(appt.get("Date", "")).strip() == date_str
+                    and str(appt.get("Status", "")).strip().lower() != "cancelled"
+                )
+                if booked_count < len(all_slots):
+                    return current_date
+
+        return None
+
