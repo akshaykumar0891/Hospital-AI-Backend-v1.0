@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from fastapi import HTTPException
 
 # Add project root to path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -40,26 +41,32 @@ def test_booking_service():
 
         # 1. Test Input Validation Failures
         print("\n--- 1. Testing Validation Failures ---")
-        # Missing field
+        # Missing field (empty name)
         bad_req1 = {"patient_name": "", "mobile": "123456", "doctor_name": "Dr. Rajesh Kumar", "date": "2026-08-03", "time": "09:00"}
-        res = booking_service.book_appointment(bad_req1)
-        print("Missing field result:", res)
-        assert res["success"] is False
-        assert "Missing required field" in res["message"]
+        try:
+            booking_service.book_appointment(bad_req1)
+            assert False, "Should have thrown HTTPException for empty name"
+        except HTTPException as e:
+            print("Successfully caught empty name validation exception:", e.detail)
+            assert e.status_code == 400
 
         # Invalid Date format
         bad_req2 = {"patient_name": "Akshay", "mobile": "9876543210", "doctor_name": "Dr. Rajesh Kumar", "date": "08-03-2026", "time": "09:00"}
-        res = booking_service.book_appointment(bad_req2)
-        print("Bad Date format result:", res)
-        assert res["success"] is False
-        assert "Invalid date format" in res["message"]
+        try:
+            booking_service.book_appointment(bad_req2)
+            assert False, "Should have thrown HTTPException for invalid date format"
+        except HTTPException as e:
+            print("Successfully caught invalid date format validation exception:", e.detail)
+            assert e.status_code == 400
 
         # Non-existent doctor
         bad_req3 = {"patient_name": "Akshay", "mobile": "9876543210", "doctor_name": "Dr. Strange", "date": "2026-08-03", "time": "09:00"}
-        res = booking_service.book_appointment(bad_req3)
-        print("Non-existent doctor result:", res)
-        assert res["success"] is False
-        assert "not found" in res["message"]
+        try:
+            booking_service.book_appointment(bad_req3)
+            assert False, "Should have thrown HTTPException for non-existent doctor"
+        except HTTPException as e:
+            print("Successfully caught non-existent doctor exception:", e.detail)
+            assert e.status_code == 404
 
         # 2. Test Successful Booking
         print("\n--- 2. Testing Successful Booking ---")
@@ -73,8 +80,9 @@ def test_booking_service():
         res1 = booking_service.book_appointment(req1)
         print("Booking 1 result:", res1)
         assert res1["success"] is True
-        assert res1["appointment_id"].startswith("APT-")
-        first_appt_id = res1["appointment_id"]
+        appt_id = res1["data"]["appointment"]["appointment_id"]
+        assert appt_id.startswith("APT-")
+        first_appt_id = appt_id
 
         # Verify it got saved in database
         status_res = appt_service.get_appointment_status(appointment_id=first_appt_id)
@@ -87,10 +95,12 @@ def test_booking_service():
 
         # 3. Test Duplicate Booking Block
         print("\n--- 3. Testing Duplicate Booking ---")
-        res_dup = booking_service.book_appointment(req1)
-        print("Duplicate booking result:", res_dup)
-        assert res_dup["success"] is False
-        assert "already exists" in res_dup["message"]
+        try:
+            booking_service.book_appointment(req1)
+            assert False, "Should have thrown HTTPException for duplicate"
+        except HTTPException as e:
+            print("Successfully caught duplicate booking exception:", e.detail)
+            assert e.status_code == 409
 
         # 4. Test Slot Already Booked (Different Patient)
         print("\n--- 4. Testing Slot Already Booked (Different Patient) ---")
@@ -101,13 +111,14 @@ def test_booking_service():
             "date": "2026-08-03",
             "time": "09:00" # same slot
         }
-        res2 = booking_service.book_appointment(req2)
-        print("Slot booked by other result:", res2)
-        assert res2["success"] is False
-        assert "unavailable" in res2["message"]
-        # Should return alternative slots
-        assert "09:30" in res2["available_slots"]
-        assert "09:00" not in res2["available_slots"]
+        try:
+            booking_service.book_appointment(req2)
+            assert False, "Should have thrown HTTPException for booked slot"
+        except HTTPException as e:
+            print("Successfully caught booked slot availability exception:", e.detail)
+            assert e.status_code == 400
+            assert "09:30" in e.detail["data"]["available_slots"]
+            assert "09:00" not in e.detail["data"]["available_slots"]
 
         # 5. Test booking sequence increments
         print("\n--- 5. Testing Booking Sequence Increments ---")
@@ -121,12 +132,13 @@ def test_booking_service():
         res3 = booking_service.book_appointment(req3)
         print("Booking 2 result:", res3)
         assert res3["success"] is True
-        assert res3["appointment_id"] != first_appt_id
+        appt_id3 = res3["data"]["appointment"]["appointment_id"]
+        assert appt_id3 != first_appt_id
         # Extract numeric suffixes to verify increment
         num1 = int(first_appt_id.split("-")[1])
-        num2 = int(res3["appointment_id"].split("-")[1])
+        num2 = int(appt_id3.split("-")[1])
         assert num2 == num1 + 1
-        print(f"Generated sequential IDs: {first_appt_id} -> {res3['appointment_id']}")
+        print(f"Generated sequential IDs: {first_appt_id} -> {appt_id3}")
 
         print("\nAll BookingService integration tests passed successfully!")
 

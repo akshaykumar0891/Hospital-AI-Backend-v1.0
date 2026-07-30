@@ -33,113 +33,103 @@ def get_appointment_service(db: Session = Depends(get_db), avail: AvailabilitySe
 
 
 
-@router.post("/check-availability")
+@router.post(
+    "/check-availability",
+    summary="Check doctor slot availability",
+    description="Calculates and lists all available slots for a doctor on a specific date. Supports searching by doctor name or ID, suggesting next available slot dates if fully booked or unavailable.",
+    response_description="Availability check results with lists of active slots."
+)
 def check_availability(req: AvailabilityRequest, avail: AvailabilityService = Depends(get_availability_service)):
     """Checks slots availability for a doctor on a specific date."""
-    res = avail.get_available_slots(req.doctor_id, req.date)
+    doctor_id = req.doctor_id
+    if not doctor_id and req.doctor_name:
+        from services.doctor_service import DoctorService
+        doc_srv = DoctorService(avail.db)
+        doc = doc_srv.get_doctor_by_name(req.doctor_name)
+        if not doc:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "success": False,
+                    "message": "Doctor not found",
+                    "errors": [f"No doctor found matching name: '{req.doctor_name}'"]
+                }
+            )
+        doctor_id = doc["Doctor ID"]
+    elif not doctor_id and not req.doctor_name:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "success": False,
+                "message": "Must provide either doctor_id or doctor_name",
+                "errors": ["Missing doctor identifier."]
+            }
+        )
+
+    res = avail.get_available_slots(doctor_id, req.date)
     if res.get("status") == "error":
-        return {
-            "success": False,
-            "message": res.get("message"),
-            "errors": [res.get("message")]
-        }
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "success": False,
+                "message": res.get("message"),
+                "errors": [res.get("message")]
+            }
+        )
     return {
         "success": True,
-        "message": f"Availability check completed for doctor ID {req.doctor_id}",
-        "data": res
+        "message": f"Availability check completed for doctor ID {doctor_id}",
+        "data": res,
+        "errors": []
     }
 
-@router.post("/book-appointment")
+@router.post(
+    "/book-appointment",
+    summary="Book a new appointment",
+    description="Validates inputs, checks doctor availability, and books a new appointment. Prevents duplicate booking conflicts.",
+    response_description="Standardized booking confirmation detail."
+)
 def book_appointment(req: AppointmentCreate, booking_srv: BookingService = Depends(get_booking_service)):
     """Books a new appointment after validations and availability checks."""
-    # Convert model to dict for booking service
     booking_data = req.model_dump()
-    res = booking_srv.book_appointment(booking_data)
-    
-    if not res.get("success"):
-        # Return structured error shape
-        return {
-            "success": False,
-            "message": res.get("message"),
-            "data": {
-                "available_slots": res.get("available_slots", []),
-                "next_available_date": res.get("next_available_date", None)
-            }
-        }
-    
-    return {
-        "success": True,
-        "message": res.get("message"),
-        "data": {
-            "appointment_id": res.get("appointment_id")
-        }
-    }
+    return booking_srv.book_appointment(booking_data)
 
-@router.post("/cancel-appointment")
+@router.post(
+    "/cancel-appointment",
+    summary="Cancel appointment",
+    description="Cancels an existing active appointment by setting its status to Cancelled.",
+    response_description="Standardized cancellation status details."
+)
 def cancel_appointment(req: CancelRequest, appt_srv: AppointmentService = Depends(get_appointment_service)):
     """Cancels an existing appointment (soft-delete)."""
-    res = appt_srv.cancel_appointment(req.appointment_id)
-    if not res.get("success"):
-        return {
-            "success": False,
-            "message": res.get("message")
-        }
-    return {
-        "success": True,
-        "message": res.get("message"),
-        "data": {
-            "appointment_id": res.get("appointment_id")
-        }
-    }
+    return appt_srv.cancel_appointment(req.appointment_id)
 
-@router.post("/reschedule-appointment")
+@router.post(
+    "/reschedule-appointment",
+    summary="Reschedule appointment",
+    description="Updates date and time parameters for an existing booking, validating target doctor slot conflict limitations.",
+    response_description="Standardized rescheduling result."
+)
 def reschedule_appointment(req: AppointmentReschedule, appt_srv: AppointmentService = Depends(get_appointment_service)):
     """Reschedules an existing active appointment."""
-    res = appt_srv.reschedule_appointment(req.appointment_id, req.new_date, req.new_time)
-    if not res.get("success"):
-        return {
-            "success": False,
-            "message": res.get("message"),
-            "data": {
-                "available_slots": res.get("available_slots", []),
-                "next_available_date": res.get("next_available_date", None)
-            }
-        }
-    return {
-        "success": True,
-        "message": res.get("message"),
-        "data": {
-            "appointment_id": res.get("appointment_id")
-        }
-    }
+    return appt_srv.reschedule_appointment(
+        req.appointment_id, 
+        req.new_date, 
+        req.new_time, 
+        req.doctor_id, 
+        req.doctor_name
+    )
 
-@router.get("/appointment-status")
+@router.get(
+    "/appointment-status",
+    summary="Search appointment status",
+    description="Retrieves status and details for appointments matching either specific ID or registered mobile phone.",
+    response_description="Standardized status queries lists."
+)
 def get_appointment_status(
     appointment_id: Optional[str] = Query(None, description="Search by unique Appointment ID"),
     mobile: Optional[str] = Query(None, description="Search by registered Mobile Number"),
     appt_srv: AppointmentService = Depends(get_appointment_service)
 ):
     """Retrieves appointment state by Appointment ID or Mobile Number."""
-    if not appointment_id and not mobile:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "success": False,
-                "message": "Must provide either appointment_id or mobile number query parameter."
-            }
-        )
-    
-    res = appt_srv.get_appointment_status(appointment_id=appointment_id, mobile=mobile)
-    if not res.get("success"):
-        return {
-            "success": False,
-            "message": res.get("message")
-        }
-        
-    return {
-        "success": True,
-        "message": "Appointments retrieved successfully",
-        "data": {
-            "appointments": res.get("appointments")
-        }
-    }
+    return appt_srv.get_appointment_status(appointment_id=appointment_id, mobile=mobile)

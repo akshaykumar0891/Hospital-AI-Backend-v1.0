@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional
 
 class Appointment(BaseModel):
@@ -22,12 +22,20 @@ class Appointment(BaseModel):
 class AppointmentCreate(BaseModel):
     patient_name: str = Field(..., min_length=1)
     mobile: str = Field(..., min_length=5)
-    doctor_name: str = Field(..., min_length=1)
+    doctor_name: Optional[str] = Field(default=None, min_length=1)
+    doctor_id: Optional[str] = Field(default=None, min_length=1)
     date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
     time: str = Field(..., pattern=r"^\d{2}:\d{2}(:\d{2})?$")
+
+    @model_validator(mode="after")
+    def check_doctor_provided(self) -> 'AppointmentCreate':
+        if not self.doctor_id and not self.doctor_name:
+            raise ValueError("Must provide either doctor_id or doctor_name")
+        return self
 
 class AppointmentReschedule(BaseModel):
     appointment_id: str = Field(..., min_length=1)
     new_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
     new_time: str = Field(..., pattern=r"^\d{2}:\d{2}(:\d{2})?$")
-
+    doctor_id: Optional[str] = Field(default=None, min_length=1)
+    doctor_name: Optional[str] = Field(default=None, min_length=1)

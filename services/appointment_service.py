@@ -1,10 +1,14 @@
 import logging
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from database.models import Appointment
+from database.models import Appointment, Doctor
 from services.availability_service import AvailabilityService
+from services.doctor_service import DoctorService
+from config import TIMEZONE
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -13,6 +17,7 @@ class AppointmentService:
     def __init__(self, db: Session, availability_service: Optional[AvailabilityService] = None):
         self.db = db
         self.avail = availability_service or AvailabilityService(db)
+        self.doc_service = DoctorService(db)
 
     def normalize_time(self, time_str: str) -> str:
         """Normalizes time to HH:MM format."""
@@ -38,64 +43,108 @@ class AppointmentService:
 
         appt = self.db.query(Appointment).filter(Appointment.appointment_id == appointment_id).first()
         if not appt:
-            logger.warning(f"Appointment ID {appointment_id} not found.")
-            return {
-                "success": False,
-                "message": f"Appointment ID {appointment_id} not found."
-            }
+            logger.warning(f"Cancellation failed: Appointment {appointment_id} not found.")
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "success": False,
+                    "message": "Appointment not found",
+                    "errors": [f"Appointment ID '{appointment_id}' does not exist."]
+                }
+            )
 
         if appt.status == "Cancelled":
-            logger.warning(f"Appointment ID {appointment_id} is already cancelled.")
-            return {
-                "success": False,
-                "message": "Appointment is already cancelled."
-            }
+            logger.warning(f"Cancellation failed: Appointment ID {appointment_id} is already cancelled.")
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "message": "Appointment is already cancelled",
+                    "errors": ["Cannot cancel an already cancelled appointment."]
+                }
+            )
 
         # Update appointment status in database
+        timestamp = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
         appt.status = "Cancelled"
-        appt.cancelled_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        appt.cancelled_at = timestamp
         self.db.commit()
 
         logger.info(f"Successfully cancelled appointment {appointment_id}")
         return {
             "success": True,
-            "appointment_id": appointment_id,
-            "message": "Appointment cancelled successfully."
+            "message": "Appointment cancelled successfully.",
+            "data": {
+                "appointment_id": appointment_id,
+                "status": "Cancelled",
+                "cancelled_at": timestamp,
+                "patient_name": appt.patient_name
+            },
+            "errors": []
         }
 
-    def reschedule_appointment(self, appointment_id: str, new_date: str, new_time: str) -> Dict[str, Any]:
+    def reschedule_appointment(
+        self, 
+        appointment_id: str, 
+        new_date: str, 
+        new_time: str,
+        doctor_id_input: Optional[str] = None,
+        doctor_name_input: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        Updates target appointment's Date and Time, sets its status to 'Rescheduled',
-        and runs availability validation checks.
+        Updates target appointment's Date, Time, and optionally Doctor,
+        verifying slot availability first.
         """
         logger.info(f"Reschedule requested for Appointment ID {appointment_id} to {new_date} at {new_time}")
 
         appt = self.db.query(Appointment).filter(Appointment.appointment_id == appointment_id).first()
         if not appt:
-            logger.warning(f"Appointment ID {appointment_id} not found.")
-            return {
-                "success": False,
-                "message": f"Appointment ID {appointment_id} not found."
-            }
+            logger.warning(f"Reschedule failed: Appointment {appointment_id} not found.")
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "success": False,
+                    "message": "Appointment not found",
+                    "errors": [f"Appointment ID '{appointment_id}' does not exist."]
+                }
+            )
 
         if appt.status == "Cancelled":
             logger.warning(f"Reschedule failed: Appointment {appointment_id} is already cancelled.")
-            return {
-                "success": False,
-                "message": "Cannot reschedule a cancelled appointment."
-            }
-
-        doctor_id = appt.doctor_id
-        doctor_name = appt.doctor_name
-        current_date = appt.appointment_date
-        current_time = self.normalize_time(appt.appointment_time)
-        new_time_norm = self.normalize_time(new_time)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "message": "Cannot reschedule a cancelled appointment",
+                    "errors": ["Rescheduling cancelled appointments is disabled."]
+                }
+            )
 
         # Date format validation
         try:
-            datetime.strptime(new_date, "%Y-%m-%d")
+            check_date = datetime.strptime(new_date.strip(), "%Y-%m-%d").date()
         except ValueError:
-            return {"success": False, "message": f"Invalid date format: '{new_date}'. Use YYYY-MM-DD"}
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "message": f"Invalid date format: '{new_date}'. Use YYYY-MM-DD",
+                    "errors": ["Date format must be YYYY-MM-DD"]
+                }
+            )
+
+        # Past Date Validation using configured Timezone
+        current_date_tz = datetime.now(ZoneInfo(TIMEZONE)).date()
+        if check_date < current_date_tz:
+            logger.warning(f"Reschedule validation failed: date {new_date} is in the past compared to today {current_date_tz}")
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "message": f"Cannot reschedule to a past date (Date: {new_date}).",
+                    "errors": [f"Selected date '{new_date}' is prior to today's date '{current_date_tz.strftime('%Y-%m-%d')}'."]
+                }
+            )
 
         # Time format validation
         try:
@@ -105,43 +154,134 @@ class AppointmentService:
             int(parts[0])
             int(parts[1])
         except ValueError:
-            return {"success": False, "message": f"Invalid time format: '{new_time}'. Use HH:MM"}
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "message": f"Invalid time format: '{new_time}'. Use HH:MM",
+                    "errors": ["Time format must be HH:MM"]
+                }
+            )
 
-        # If date and time are identical, return success with no action
-        if current_date == new_date and current_time == new_time_norm:
+        # Resolve doctor if provided in reschedule request
+        doctor = None
+        if doctor_id_input:
+            doctor = self.db.query(Doctor).filter(Doctor.doctor_id == doctor_id_input).first()
+        elif doctor_name_input:
+            doctor = self.db.query(Doctor).filter(Doctor.doctor_name == doctor_name_input).first()
+            if not doctor:
+                matched_docs = self.doc_service.search_doctors(doctor_name_input)
+                if matched_docs:
+                    doctor = self.db.query(Doctor).filter(Doctor.doctor_id == matched_docs[0]["Doctor ID"]).first()
+        
+        if doctor:
+            doctor_id = doctor.doctor_id
+            doctor_name = doctor.doctor_name
+        else:
+            if doctor_id_input or doctor_name_input:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "success": False,
+                        "message": "Doctor not found",
+                        "errors": [f"No doctor found matching '{doctor_id_input or doctor_name_input}'"]
+                    }
+                )
+            # Default to existing doctor
+            doctor_id = appt.doctor_id
+            doctor_name = appt.doctor_name
+
+        current_date = appt.appointment_date
+        current_time = self.normalize_time(appt.appointment_time)
+        new_time_norm = self.normalize_time(new_time)
+
+        # If date, time, and doctor are identical, return success with no action
+        if current_date == new_date and current_time == new_time_norm and appt.doctor_id == doctor_id:
             return {
                 "success": True,
-                "appointment_id": appointment_id,
-                "message": "Appointment rescheduled successfully."
+                "message": "Appointment rescheduled successfully.",
+                "data": {
+                    "appointment_id": appointment_id,
+                    "old_slot": {"date": current_date, "time": current_time},
+                    "new_slot": {"date": new_date, "time": new_time_norm},
+                    "doctor_name": doctor_name
+                },
+                "errors": []
             }
 
         # Validate availability using AvailabilityService
         avail_res = self.avail.get_available_slots(doctor_id, new_date)
         if avail_res.get("status") == "error":
-            return {"success": False, "message": avail_res.get("message")}
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "message": avail_res.get("message"),
+                    "errors": [avail_res.get("message")]
+                }
+            )
+
+        if avail_res.get("status") in ["unavailable", "fully_booked"]:
+            msg = avail_res.get("message")
+            logger.warning(f"Reschedule failed: doctor unavailable. Details: {msg}")
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "message": msg,
+                    "errors": [msg],
+                    "data": {
+                        "available_slots": [],
+                        "next_available_date": avail_res.get("next_available_date")
+                    }
+                }
+            )
 
         available_slots = avail_res.get("available_slots", [])
         if new_time_norm not in available_slots:
             logger.warning(f"Reschedule failed: Slot {new_time_norm} is unavailable for {doctor_name} on {new_date}")
-            return {
-                "success": False,
-                "message": f"Selected time slot {new_time_norm} is unavailable.",
-                "available_slots": available_slots,
-                "next_available_date": avail_res.get("next_available_date")
-            }
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "message": f"Selected time slot {new_time_norm} is unavailable.",
+                    "errors": [f"Slot {new_time_norm} is already booked or outside doctor's work hours."],
+                    "data": {
+                        "available_slots": available_slots,
+                        "next_available_date": avail_res.get("next_available_date")
+                    }
+                }
+            )
 
         # Update reschedule coordinates in database
         appt.appointment_date = new_date
         appt.appointment_time = new_time_norm
+        appt.doctor_id = doctor_id
+        appt.doctor_name = doctor_name
+        if doctor:
+            appt.department = doctor.department
+            
         appt.status = "Rescheduled"
-        appt.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        appt.updated_at = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
         self.db.commit()
 
         logger.info(f"Successfully rescheduled appointment {appointment_id} to {new_date} {new_time_norm}")
         return {
             "success": True,
-            "appointment_id": appointment_id,
-            "message": "Appointment rescheduled successfully."
+            "message": "Appointment rescheduled successfully.",
+            "data": {
+                "appointment_id": appointment_id,
+                "old_slot": {
+                    "date": current_date,
+                    "time": current_time
+                },
+                "new_slot": {
+                    "date": new_date,
+                    "time": new_time_norm
+                },
+                "doctor_name": doctor_name
+            },
+            "errors": []
         }
 
     def get_appointment_status(self, appointment_id: Optional[str] = None, mobile: Optional[str] = None) -> Dict[str, Any]:
@@ -150,10 +290,14 @@ class AppointmentService:
         formatting response back to original list formats.
         """
         if not appointment_id and not mobile:
-            return {
-                "success": False,
-                "message": "Provide either appointment_id or mobile query parameter."
-            }
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "message": "Must provide either appointment_id or mobile number query parameter.",
+                    "errors": ["Missing search criteria."]
+                }
+            )
 
         query = self.db.query(Appointment)
         if appointment_id:
@@ -180,38 +324,34 @@ class AppointmentService:
                 "Cancelled At": appt.cancelled_at
             })
 
-        # Return format matching route specifications
-        # Wait, if no appointments are found, did the old one return an error?
-        # In Excel version, if appointment_id was provided and not found, it returned success=False.
-        # If mobile was provided and not found, it returned success=False.
-        # Wait! Let's check how the previous route handled empty matches.
-        # Let's check routes/booking_routes.py's implementation of `/appointment-status`!
-        # Actually, the route itself delegates directly to the service:
-        # return service.get_appointment_status(appointment_id, mobile)
-        # In our previous Excel version:
-        # If no appointment ID was found, it returned:
-        # {"success": False, "message": f"No appointment found with ID: {appointment_id}"}
-        # If no mobile was found, it returned:
-        # {"success": False, "message": f"No appointments found matching the mobile number: {mobile}"}
-        # Let's replicate this exact error behavior to be 100% compatible!
         if not mapped_appts:
             if appointment_id:
-                return {
-                    "success": False,
-                    "message": f"No appointment found with ID: {appointment_id}"
-                }
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "success": False,
+                        "message": "Appointment not found",
+                        "errors": [f"No appointment found with ID: {appointment_id}"]
+                    }
+                )
             else:
-                return {
-                    "success": False,
-                    "message": f"No appointments found matching the mobile number: {mobile}"
-                }
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "success": False,
+                        "message": "No appointments found matching mobile",
+                        "errors": [f"No appointments found matching the mobile number: {mobile}"]
+                    }
+                )
 
-        # If it found appointments, sort them by Date and Time (active first, or reverse chronological)
-        # to match exact previous sort behavior!
+        # Sort matching appointments by Date and Time (reverse chronological)
         mapped_appts.sort(key=lambda x: (x.get("Date", ""), x.get("Time", "")), reverse=True)
 
         return {
             "success": True,
-            "appointments": mapped_appts
+            "message": "Appointments retrieved successfully",
+            "data": {
+                "appointments": mapped_appts
+            },
+            "errors": []
         }
-

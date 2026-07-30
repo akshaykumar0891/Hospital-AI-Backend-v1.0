@@ -122,6 +122,45 @@ def test_fastapi_endpoints():
         assert res.json()["data"]["service"] == "Hospital AI Backend"
         assert res.json()["data"]["database"] == "PostgreSQL"
 
+        # 3c. Test /api/v1/ai-capabilities
+        print("\n--- 3c. Testing GET /api/v1/ai-capabilities ---")
+        res = client.get("/api/v1/ai-capabilities")
+        print("AI Capabilities response:", res.json())
+        assert res.status_code == 200
+        assert res.json()["success"] is True
+        assert res.json()["data"]["hospital_name"] == "ABC Hospital"
+
+        # 3d. Test /api/v1/search-doctors
+        print("\n--- 3d. Testing GET /api/v1/search-doctors ---")
+        res = client.get("/api/v1/search-doctors?query=rajesh")
+        print("Search doctors response:", res.json())
+        assert res.status_code == 200
+        assert res.json()["success"] is True
+        assert len(res.json()["data"]) == 1
+        assert res.json()["data"][0]["doctor_name"] == "Dr. Rajesh Kumar"
+
+        # Test search with synonym
+        res = client.get("/api/v1/search-doctors?query=pediatrician")
+        print("Search pediatrician response:", res.json())
+        assert res.status_code == 200
+        assert len(res.json()["data"]) == 1
+        assert res.json()["data"][0]["doctor_name"] == "Dr. Priya Sharma"
+
+        # 3e. Test /api/v1/departments
+        print("\n--- 3e. Testing GET /api/v1/departments ---")
+        res = client.get("/api/v1/departments")
+        print("Departments response:", res.json())
+        assert res.status_code == 200
+        assert "Cardiology" in res.json()["data"]
+
+        # 3f. Test /api/v1/doctors-by-department/{department}
+        print("\n--- 3f. Testing GET /api/v1/doctors-by-department ---")
+        res = client.get("/api/v1/doctors-by-department/Cardiology")
+        print("Doctors by department response:", res.json())
+        assert res.status_code == 200
+        assert len(res.json()["data"]) == 1
+        assert res.json()["data"][0]["Doctor Name"] == "Dr. Rajesh Kumar"
+
         # 4. Test /api/v1/check-availability
         print("\n--- 4. Testing POST /api/v1/check-availability ---")
         avail_payload = {"doctor_id": "D001", "date": "2026-08-03"}
@@ -144,13 +183,13 @@ def test_fastapi_endpoints():
         print("Book result:", res.json())
         assert res.status_code == 200
         assert res.json()["success"] is True
-        appt_id = res.json()["data"]["appointment_id"]
+        appt_id = res.json()["data"]["appointment"]["appointment_id"]
         assert appt_id.startswith("APT-")
 
         # Duplicate check
         res_dup = client.post("/api/v1/book-appointment", json=book_payload)
         print("Duplicate book result:", res_dup.json())
-        assert res_dup.status_code == 200
+        assert res_dup.status_code == 409
         assert res_dup.json()["success"] is False
         assert "already exists" in res_dup.json()["message"]
 
@@ -160,7 +199,7 @@ def test_fastapi_endpoints():
         book_payload_diff["mobile"] = "1111111111"
         res_diff = client.post("/api/v1/book-appointment", json=book_payload_diff)
         print("Booked slot result:", res_diff.json())
-        assert res_diff.status_code == 200
+        assert res_diff.status_code == 400
         assert res_diff.json()["success"] is False
         assert "10:30" not in res_diff.json()["data"]["available_slots"]
 

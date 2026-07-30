@@ -90,7 +90,7 @@ def test_database_manager_enhanced():
         print("\n--- Saved Appointment Status ---")
         print(status_res)
         assert status_res["success"] is True
-        saved_appt = status_res["appointments"][0]
+        saved_appt = status_res["data"]["appointments"][0]
         assert saved_appt["Patient Name"] == "Alice Smith"
         assert saved_appt["Department"] == "General Medicine"
         assert saved_appt["Created At"] is not None
@@ -104,7 +104,7 @@ def test_database_manager_enhanced():
         # 6. Verify cancelled
         status_res2 = appt_srv.get_appointment_status(appointment_id="APP-ENHANCED-001")
         assert status_res2["success"] is True
-        cancelled_appt = status_res2["appointments"][0]
+        cancelled_appt = status_res2["data"]["appointments"][0]
         assert cancelled_appt["Status"] == "Cancelled"
         assert cancelled_appt["Cancelled At"] is not None
         print("cancel_appointment test passed.")

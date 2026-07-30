@@ -67,7 +67,7 @@ def test_appointment_service():
         # First book an appointment
         book_res = book_service.book_appointment(valid_create)
         assert book_res["success"] is True
-        appt_id = book_res["appointment_id"]
+        appt_id = book_res["data"]["appointment"]["appointment_id"]
         print(f"Booked appointment for cancellation: {appt_id}")
 
         # Cancel it
@@ -83,17 +83,21 @@ def test_appointment_service():
         assert cancelled_appt["Cancelled At"] is not None
         assert cancelled_appt["Patient Name"] == "Bob"  # preserved fields
 
-        # Cancel again (should fail)
-        cancel_dup = appt_service.cancel_appointment(appt_id)
-        print("Cancellation duplicate response:", cancel_dup)
-        assert cancel_dup["success"] is False
-        assert "already cancelled" in cancel_dup["message"]
+        # Cancel again (should fail with HTTPException 400)
+        try:
+            appt_service.cancel_appointment(appt_id)
+            assert False, "Should have thrown HTTPException"
+        except HTTPException as e:
+            print("Successfully caught duplicate cancellation exception:", e.detail)
+            assert e.status_code == 400
 
-        # Cancel non-existent ID
-        cancel_fake = appt_service.cancel_appointment("APT-FAKE-001")
-        print("Cancellation fake ID response:", cancel_fake)
-        assert cancel_fake["success"] is False
-        assert "not found" in cancel_fake["message"]
+        # Cancel non-existent ID (should fail with HTTPException 404)
+        try:
+            appt_service.cancel_appointment("APT-FAKE-001")
+            assert False, "Should have thrown HTTPException"
+        except HTTPException as e:
+            print("Successfully caught invalid cancel ID exception:", e.detail)
+            assert e.status_code == 404
 
         # 3. Test Rescheduling
         print("\n--- 3. Testing Rescheduling ---")
@@ -107,7 +111,7 @@ def test_appointment_service():
         }
         book_res_2 = book_service.book_appointment(valid_create_2)
         assert book_res_2["success"] is True
-        appt_id_2 = book_res_2["appointment_id"]
+        appt_id_2 = book_res_2["data"]["appointment"]["appointment_id"]
         print(f"Booked appointment for rescheduling: {appt_id_2}")
 
         # Reschedule it to 11:30 (free slot)
@@ -132,18 +136,22 @@ def test_appointment_service():
             "date": "2026-08-03",
             "time": "10:00"
         })
-        # Try to reschedule Alice to 10:00 (booked by Charlie)
-        resched_fail = appt_service.reschedule_appointment(appt_id_2, "2026-08-03", "10:00")
-        print("Reschedule to booked slot response:", resched_fail)
-        assert resched_fail["success"] is False
-        assert "unavailable" in resched_fail["message"]
-        assert "10:00" not in resched_fail["available_slots"]
+        # Try to reschedule Alice to 10:00 (booked by Charlie) (should fail with HTTPException 400)
+        try:
+            appt_service.reschedule_appointment(appt_id_2, "2026-08-03", "10:00")
+            assert False, "Should have thrown HTTPException"
+        except HTTPException as e:
+            print("Successfully caught slot unavailable reschedule exception:", e.detail)
+            assert e.status_code == 400
+            assert "10:00" not in e.detail["data"]["available_slots"]
 
-        # Try to reschedule cancelled Bob
-        resched_cancelled = appt_service.reschedule_appointment(appt_id, "2026-08-03", "12:00")
-        print("Reschedule cancelled appointment response:", resched_cancelled)
-        assert resched_cancelled["success"] is False
-        assert "Cannot reschedule" in resched_cancelled["message"]
+        # Try to reschedule cancelled Bob (should fail with HTTPException 400)
+        try:
+            appt_service.reschedule_appointment(appt_id, "2026-08-03", "12:00")
+            assert False, "Should have thrown HTTPException"
+        except HTTPException as e:
+            print("Successfully caught reschedule cancelled exception:", e.detail)
+            assert e.status_code == 400
 
         # 4. Test Lookups
         print("\n--- 4. Testing Lookups (Appointment Status) ---")
@@ -163,10 +171,13 @@ def test_appointment_service():
         assert len(lookup_mob_res["appointments"]) == 1
         assert lookup_mob_res["appointments"][0]["Patient Name"] == "Alice"
 
-        # Lookup by fake Mobile
-        lookup_fake_mob = appt_service.get_appointment_status(mobile="0000000000")
-        print("Lookup by fake Mobile response:", lookup_fake_mob)
-        assert lookup_fake_mob["success"] is False
+        # Lookup by fake Mobile (should fail with HTTPException 404)
+        try:
+            appt_service.get_appointment_status(mobile="0000000000")
+            assert False, "Should have thrown HTTPException"
+        except HTTPException as e:
+            print("Successfully caught fake Mobile lookup exception:", e.detail)
+            assert e.status_code == 404
 
         print("\nAll AppointmentService integration tests passed successfully!")
 

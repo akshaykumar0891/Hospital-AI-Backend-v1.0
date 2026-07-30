@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from database.models import Appointment
 from services.doctor_service import DoctorService
+from config import HOLIDAYS, APPOINTMENT_LIMITS_DAYS
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ class AvailabilityService:
 
     def parse_available_days(self, days_str: str) -> List[int]:
         """
-        Parses available days string from Excel (e.g. "Mon,Tue,Wed,Fri" or "Mon-Sat")
+        Parses available days string from database (e.g. "Mon,Tue,Wed,Fri" or "Mon-Sat")
         into a list of weekday integers (0 = Mon, ..., 6 = Sun).
         """
         if not days_str or not isinstance(days_str, str):
@@ -96,8 +97,8 @@ class AvailabilityService:
 
     def get_available_slots(self, doctor_id: str, date_str: str) -> Dict[str, Any]:
         """
-        Gets available slots for a doctor on a specific date.
-        If the doctor is not working or has no slots, suggests next available date.
+        Gets available slots for a doctor on a specific date, checking calendar,
+        holidays, and schedule logic.
         """
         doctor = self.doc_service.get_doctor_by_id(doctor_id)
         if not doctor:
@@ -108,14 +109,36 @@ class AvailabilityService:
         except ValueError:
             return {"status": "error", "message": f"Invalid date format: {date_str}. Use YYYY-MM-DD"}
 
-        # Check if doctor works on this weekday
+        # 1. Check if date is a configured public/hospital holiday
+        if date_str in HOLIDAYS:
+            next_date = self.get_next_available_date(doctor, check_date + timedelta(days=1))
+            logger.info(f"Availability check: {date_str} is a hospital holiday. Recommending next date: {next_date}")
+            return {
+                "status": "unavailable",
+                "message": f"{doctor['Doctor Name']} is not available on {date_str} (Public/Hospital Holiday).",
+                "next_available_date": next_date.strftime("%Y-%m-%d") if next_date else None,
+                "available_slots": [],
+                "slots": [],
+                "doctor": doctor,
+                "date": date_str,
+                "consultation_duration": doctor["Slot Duration"],
+                "department": doctor["Department"]
+            }
+
+        # 2. Check if doctor works on this weekday
         if not self.is_doctor_available_on_date(doctor, check_date):
             next_date = self.get_next_available_date(doctor, check_date)
+            logger.info(f"Availability check: Doctor not available on weekday {check_date.strftime('%A')}. Recommending: {next_date}")
             return {
                 "status": "unavailable",
                 "message": f"{doctor['Doctor Name']} is not available on {date_str} ({check_date.strftime('%A')}).",
                 "next_available_date": next_date.strftime("%Y-%m-%d") if next_date else None,
-                "slots": []
+                "available_slots": [],
+                "slots": [],
+                "doctor": doctor,
+                "date": date_str,
+                "consultation_duration": doctor["Slot Duration"],
+                "department": doctor["Department"]
             }
 
         # Generate all slots for the doctor
@@ -153,23 +176,33 @@ class AvailabilityService:
         if not available_slots_only:
             # Doctor is working but fully booked, search next available date
             next_date = self.get_next_available_date(doctor, check_date + timedelta(days=1))
+            logger.info(f"Availability check: Doctor is fully booked on {date_str}. Recommending: {next_date}")
             return {
                 "status": "fully_booked",
                 "message": f"{doctor['Doctor Name']} is fully booked on {date_str}.",
                 "next_available_date": next_date.strftime("%Y-%m-%d") if next_date else None,
-                "slots": slots_availability
+                "available_slots": [],
+                "slots": slots_availability,
+                "doctor": doctor,
+                "date": date_str,
+                "consultation_duration": doctor["Slot Duration"],
+                "department": doctor["Department"]
             }
 
+        logger.info(f"Availability check: Doctor has {len(available_slots_only)} slots available on {date_str}")
         return {
             "status": "available",
-            "doctor_name": doctor["Doctor Name"],
+            "doctor": doctor,
             "date": date_str,
+            "available_slots": available_slots_only,
             "slots": slots_availability,
-            "available_slots": available_slots_only
+            "consultation_duration": doctor["Slot Duration"],
+            "department": doctor["Department"],
+            "next_available_date": None
         }
 
     def get_next_available_date(self, doctor: Dict[str, Any], start_date: date) -> Optional[date]:
-        """Finds the next date (within 14 days) on which the doctor has at least one free slot."""
+        """Finds the next date (within APPOINTMENT_LIMITS_DAYS) on which the doctor has at least one free slot."""
         available_weekdays = self.parse_available_days(doctor.get("Available Days", ""))
         if not available_weekdays:
             return None
@@ -181,12 +214,16 @@ class AvailabilityService:
         if not all_slots:
             return None
 
-        # Check up to 14 days in the future
-        for i in range(0, 15):
+        # Check up to APPOINTMENT_LIMITS_DAYS in the future
+        for i in range(0, APPOINTMENT_LIMITS_DAYS + 1):
             current_date = start_date + timedelta(days=i)
-            if current_date.weekday() in available_weekdays:
-                date_str = current_date.strftime("%Y-%m-%d")
+            date_str = current_date.strftime("%Y-%m-%d")
+            
+            # Skip if date is a holiday
+            if date_str in HOLIDAYS:
+                continue
                 
+            if current_date.weekday() in available_weekdays:
                 # Count booked slots for this doctor in database
                 booked_count = self.db.query(Appointment).filter(
                     Appointment.doctor_id == doctor["Doctor ID"],
@@ -198,5 +235,3 @@ class AvailabilityService:
                     return current_date
 
         return None
-
-
