@@ -1,30 +1,42 @@
 import sys
-import os
-import shutil
 from pathlib import Path
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 # Add project root to path
-sys.path.append("d:/hospital-ai")
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from database.excel_manager import ExcelManager
+from database.database import Base
+from database.models import Doctor, Appointment
 from services.availability_service import AvailabilityService
 from services.booking_service import BookingService
-from config import EXCEL_DB_PATH
+from services.appointment_service import AppointmentService
 
 def test_booking_service():
-    original_db = EXCEL_DB_PATH
-    test_db = original_db.parent / "hospital_data_test_booking.xlsx"
-
-    print(f"Original DB Path: {original_db}")
-    print(f"Test DB Path: {test_db}")
-
-    shutil.copy2(original_db, test_db)
-    print("Copied database to test database file.")
+    # Setup SQLite in-memory DB
+    engine = create_engine("sqlite:///:memory:")
+    SessionClass = sessionmaker(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    
+    db = SessionClass()
 
     try:
-        manager = ExcelManager(file_path=str(test_db))
-        avail_service = AvailabilityService(excel_manager=manager)
-        booking_service = BookingService(excel_manager=manager, availability_service=avail_service)
+        # Seed doctors
+        doc1 = Doctor(
+            doctor_id="D001",
+            doctor_name="Dr. Rajesh Kumar",
+            department="Cardiology",
+            available_days="Mon,Tue,Wed,Fri",
+            start_time="09:00",
+            end_time="13:00",
+            slot_duration=30
+        )
+        db.add(doc1)
+        db.commit()
+
+        avail_service = AvailabilityService(db)
+        booking_service = BookingService(db, availability_service=avail_service)
+        appt_service = AppointmentService(db, availability_service=avail_service)
 
         # 1. Test Input Validation Failures
         print("\n--- 1. Testing Validation Failures ---")
@@ -65,8 +77,9 @@ def test_booking_service():
         first_appt_id = res1["appointment_id"]
 
         # Verify it got saved in database
-        saved_appt = manager.get_appointment_by_id(first_appt_id)
-        print("Saved appointment in Excel:", saved_appt)
+        status_res = appt_service.get_appointment_status(appointment_id=first_appt_id)
+        saved_appt = status_res["data"]["appointments"][0]
+        print("Saved appointment in DB:", saved_appt)
         assert saved_appt is not None
         assert saved_appt["Patient Name"] == "Akshay"
         assert saved_appt["Department"] == "Cardiology"
@@ -118,9 +131,7 @@ def test_booking_service():
         print("\nAll BookingService integration tests passed successfully!")
 
     finally:
-        if os.path.exists(test_db):
-            os.remove(test_db)
-            print("\nRemoved test database file.")
+        db.close()
 
 if __name__ == "__main__":
     test_booking_service()

@@ -1,16 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException
-from database.excel_manager import ExcelManager
+from sqlalchemy.orm import Session
+from database.database import get_db
+from services.doctor_service import DoctorService
+from services.hospital_service import HospitalService
 
 router = APIRouter()
 
-def get_excel_manager() -> ExcelManager:
-    return ExcelManager()
-
 @router.get("/doctors")
-def get_doctors(db: ExcelManager = Depends(get_excel_manager)):
-    """Retrieves all doctors from the excel sheet database."""
+def get_doctors(db: Session = Depends(get_db)):
+    """Retrieves all doctors from the database."""
     try:
-        doctors = db.get_doctors()
+        service = DoctorService(db)
+        doctors = service.get_doctors()
         return {
             "success": True,
             "message": "Doctors retrieved successfully",
@@ -27,10 +28,11 @@ def get_doctors(db: ExcelManager = Depends(get_excel_manager)):
         )
 
 @router.get("/hospital-info")
-def get_hospital_info(db: ExcelManager = Depends(get_excel_manager)):
+def get_hospital_info(db: Session = Depends(get_db)):
     """Retrieves hospital metadata information."""
     try:
-        info = db.get_hospital_info()
+        service = HospitalService(db)
+        info = service.get_hospital_info()
         return {
             "success": True,
             "message": "Hospital info retrieved successfully",
@@ -45,3 +47,4 @@ def get_hospital_info(db: ExcelManager = Depends(get_excel_manager)):
                 "errors": [str(e)]
             }
         )
+

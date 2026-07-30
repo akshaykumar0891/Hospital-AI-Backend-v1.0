@@ -1,7 +1,9 @@
 import logging
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any, Optional
-from database.excel_manager import ExcelManager
+from sqlalchemy.orm import Session
+from database.models import Appointment
+from services.doctor_service import DoctorService
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -11,8 +13,9 @@ DAYS_MAP = {
 }
 
 class AvailabilityService:
-    def __init__(self, excel_manager: Optional[ExcelManager] = None):
-        self.db = excel_manager or ExcelManager()
+    def __init__(self, db: Session):
+        self.db = db
+        self.doc_service = DoctorService(db)
 
     def parse_available_days(self, days_str: str) -> List[int]:
         """
@@ -96,7 +99,7 @@ class AvailabilityService:
         Gets available slots for a doctor on a specific date.
         If the doctor is not working or has no slots, suggests next available date.
         """
-        doctor = self.db.get_doctor_by_id(doctor_id)
+        doctor = self.doc_service.get_doctor_by_id(doctor_id)
         if not doctor:
             return {"status": "error", "message": f"Doctor with ID {doctor_id} not found"}
 
@@ -122,18 +125,18 @@ class AvailabilityService:
         
         all_slots = self.generate_slots(start_time, end_time, duration)
 
-        # Get booked slots
-        appointments = self.db.get_appointments()
+        # Get booked slots from the database
+        appointments_models = self.db.query(Appointment).filter(
+            Appointment.doctor_id == doctor_id,
+            Appointment.appointment_date == date_str,
+            Appointment.status != "Cancelled"
+        ).all()
+
         booked_times = set()
-        for appt in appointments:
-            appt_doc_id = str(appt.get("Doctor ID", "")).strip().lower()
-            appt_date = str(appt.get("Date", "")).strip()
-            appt_status = str(appt.get("Status", "")).strip().lower()
-            
-            if appt_doc_id == str(doctor_id).lower() and appt_date == date_str and appt_status != "cancelled":
-                booked_time = self.normalize_time(appt.get("Time", ""))
-                if booked_time:
-                    booked_times.add(booked_time)
+        for appt in appointments_models:
+            booked_time = self.normalize_time(appt.appointment_time)
+            if booked_time:
+                booked_times.add(booked_time)
 
         # Build list of slots with availability details
         slots_availability = []
@@ -178,21 +181,22 @@ class AvailabilityService:
         if not all_slots:
             return None
 
-        appointments = self.db.get_appointments()
-
         # Check up to 14 days in the future
         for i in range(0, 15):
             current_date = start_date + timedelta(days=i)
             if current_date.weekday() in available_weekdays:
                 date_str = current_date.strftime("%Y-%m-%d")
-                booked_count = sum(
-                    1 for appt in appointments
-                    if str(appt.get("Doctor ID", "")).strip().lower() == str(doctor["Doctor ID"]).lower()
-                    and str(appt.get("Date", "")).strip() == date_str
-                    and str(appt.get("Status", "")).strip().lower() != "cancelled"
-                )
+                
+                # Count booked slots for this doctor in database
+                booked_count = self.db.query(Appointment).filter(
+                    Appointment.doctor_id == doctor["Doctor ID"],
+                    Appointment.appointment_date == date_str,
+                    Appointment.status != "Cancelled"
+                ).count()
+                
                 if booked_count < len(all_slots):
                     return current_date
 
         return None
+
 

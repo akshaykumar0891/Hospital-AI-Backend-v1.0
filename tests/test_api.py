@@ -1,6 +1,4 @@
 import sys
-import shutil
-import os
 from pathlib import Path
 from fastapi.testclient import TestClient
 
@@ -8,27 +6,86 @@ from fastapi.testclient import TestClient
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from app import app
-from config import EXCEL_DB_PATH
 
 def test_fastapi_endpoints():
-    original_db = EXCEL_DB_PATH
-    test_db = original_db.parent / "hospital_data_test_api.xlsx"
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from database.database import Base, get_db
+    from database.models import Doctor, Appointment, HospitalInfo
+    
+    import os
+    if os.path.exists("test_api.db"):
+        try:
+            os.remove("test_api.db")
+        except Exception:
+            pass
 
-    print(f"Original DB Path: {original_db}")
-    print(f"Test DB Path: {test_db}")
+    engine = create_engine("sqlite:///test_api.db", connect_args={"check_same_thread": False})
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    
+    # Build tables
+    Base.metadata.create_all(bind=engine)
+    
+    # Seed initial data
+    db = TestingSessionLocal()
+    try:
+        doctors_data = [
+            {
+                "doctor_id": "D001",
+                "doctor_name": "Dr. Rajesh Kumar",
+                "department": "Cardiology",
+                "available_days": "Mon,Tue,Wed,Fri",
+                "start_time": "09:00",
+                "end_time": "13:00",
+                "slot_duration": 30
+            },
+            {
+                "doctor_id": "D002",
+                "doctor_name": "Dr. Priya Sharma",
+                "department": "Pediatrics",
+                "available_days": "Mon-Sat",
+                "start_time": "10:00",
+                "end_time": "16:00",
+                "slot_duration": 30
+            },
+            {
+                "doctor_id": "D003",
+                "doctor_name": "Dr. Arjun Reddy",
+                "department": "General Medicine",
+                "available_days": "Mon-Sat",
+                "start_time": "09:00",
+                "end_time": "17:00",
+                "slot_duration": 30
+            }
+        ]
+        for doc in doctors_data:
+            db.add(Doctor(**doc))
+        
+        hospital_data = [
+            {"key": "Hospital Name", "value": "ABC Hospital"},
+            {"key": "Opening Time", "value": "09:00"},
+            {"key": "Closing Time", "value": "20:00"},
+            {"key": "Emergency", "value": "24 Hours"},
+            {"key": "Phone", "value": "9876543210"},
+            {"key": "Address", "value": "Visakhapatnam"},
+            {"key": "Insurance", "value": "Cash, UPI, Insurance"}
+        ]
+        for info in hospital_data:
+            db.add(HospitalInfo(**info))
+        db.commit()
+    finally:
+        db.close()
 
-    shutil.copy2(original_db, test_db)
-    print("Copied database to test database file.")
+    # Dependency override function
+    def override_get_db():
+        db = TestingSessionLocal()
+        try:
+            yield db
+            # No need for finally: close is handled
+        finally:
+            db.close()
 
-    # Override dependencies
-    from database.excel_manager import ExcelManager
-    from routes.doctor_routes import get_excel_manager as doc_get_db
-    from routes.booking_routes import get_excel_manager as book_get_db
-
-    test_manager = ExcelManager(file_path=str(test_db))
-    app.dependency_overrides[doc_get_db] = lambda: test_manager
-    app.dependency_overrides[book_get_db] = lambda: test_manager
-
+    app.dependency_overrides[get_db] = override_get_db
     client = TestClient(app)
 
     try:
@@ -43,7 +100,7 @@ def test_fastapi_endpoints():
         # 2. Test /api/v1/doctors
         print("\n--- 2. Testing GET /api/v1/doctors ---")
         res = client.get("/api/v1/doctors")
-        print("Doctors list count:", len(res.json()["data"]))
+        print("Doctors list response:", res.json())
         assert res.status_code == 200
         assert res.json()["success"] is True
         assert len(res.json()["data"]) == 3
@@ -63,7 +120,7 @@ def test_fastapi_endpoints():
         assert res.status_code == 200
         assert res.json()["success"] is True
         assert res.json()["data"]["service"] == "Hospital AI Backend"
-        assert res.json()["data"]["environment"] == "development"
+        assert res.json()["data"]["database"] == "PostgreSQL"
 
         # 4. Test /api/v1/check-availability
         print("\n--- 4. Testing POST /api/v1/check-availability ---")
@@ -157,11 +214,13 @@ def test_fastapi_endpoints():
         print("\nAll FastAPI Router endpoints tests passed successfully!")
 
     finally:
-        # Clear overrides and clean up
         app.dependency_overrides.clear()
-        if os.path.exists(test_db):
-            os.remove(test_db)
-            print("\nRemoved test database file.")
+        import os
+        if os.path.exists("test_api.db"):
+            try:
+                os.remove("test_api.db")
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     test_fastapi_endpoints()

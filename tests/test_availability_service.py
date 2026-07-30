@@ -1,29 +1,39 @@
 import sys
-import os
-import shutil
 from pathlib import Path
 from datetime import date, datetime
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 # Add project root to path
-sys.path.append("d:/hospital-ai")
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from database.excel_manager import ExcelManager
+from database.database import Base
+from database.models import Doctor, Appointment
 from services.availability_service import AvailabilityService
-from config import EXCEL_DB_PATH
 
 def test_availability_service():
-    original_db = EXCEL_DB_PATH
-    test_db = original_db.parent / "hospital_data_test_avail.xlsx"
-
-    print(f"Original DB Path: {original_db}")
-    print(f"Test DB Path: {test_db}")
-
-    shutil.copy2(original_db, test_db)
-    print("Copied database to test database file.")
+    # Setup SQLite in-memory DB
+    engine = create_engine("sqlite:///:memory:")
+    SessionClass = sessionmaker(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    
+    db = SessionClass()
 
     try:
-        manager = ExcelManager(file_path=str(test_db))
-        service = AvailabilityService(excel_manager=manager)
+        # Seed doctor Rajesh Kumar (D001)
+        doc1 = Doctor(
+            doctor_id="D001",
+            doctor_name="Dr. Rajesh Kumar",
+            department="Cardiology",
+            available_days="Mon,Tue,Wed,Fri",
+            start_time="09:00",
+            end_time="13:00",
+            slot_duration=30
+        )
+        db.add(doc1)
+        db.commit()
+
+        service = AvailabilityService(db)
 
         # 1. Test Day parsing
         mon_sat = service.parse_available_days("Mon-Sat")
@@ -64,18 +74,20 @@ def test_availability_service():
         print("Doctor working day (no bookings) check passed.")
 
         # 5. Save a booked appointment and verify it shows as booked (False)
-        test_appt = {
-            "Appointment ID": "APP-AVAIL-TEST-001",
-            "Patient Name": "Bob Builder",
-            "Mobile": "5555555555",
-            "Doctor ID": "D001",
-            "Doctor Name": "Dr. Rajesh Kumar",
-            "Department": "Cardiology",
-            "Date": "2026-08-03",
-            "Time": "10:00",
-            "Status": "Booked"
-        }
-        manager.save_appointment(test_appt)
+        test_appt = Appointment(
+            appointment_id="APP-AVAIL-TEST-001",
+            patient_name="Bob Builder",
+            mobile="5555555555",
+            doctor_id="D001",
+            doctor_name="Dr. Rajesh Kumar",
+            department="Cardiology",
+            appointment_date="2026-08-03",
+            appointment_time="10:00",
+            status="Booked",
+            created_at="2026-07-30 12:00:00"
+        )
+        db.add(test_appt)
+        db.commit()
         print("\nSaved a booked appointment for 2026-08-03 10:00.")
 
         res_mon_booked = service.get_available_slots("D001", "2026-08-03")
@@ -92,17 +104,19 @@ def test_availability_service():
         # D001 has 8 slots. Let's book the remaining 7 slots to make him fully booked!
         slots_to_book = ["09:00", "09:30", "10:30", "11:00", "11:30", "12:00", "12:30"]
         for idx, t in enumerate(slots_to_book):
-            manager.save_appointment({
-                "Appointment ID": f"APP-AVAIL-TEST-FB-{idx}",
-                "Patient Name": f"Patient {idx}",
-                "Mobile": "5555555555",
-                "Doctor ID": "D001",
-                "Doctor Name": "Dr. Rajesh Kumar",
-                "Department": "Cardiology",
-                "Date": "2026-08-03",
-                "Time": t,
-                "Status": "Booked"
-            })
+            db.add(Appointment(
+                appointment_id=f"APP-AVAIL-TEST-FB-{idx}",
+                patient_name=f"Patient {idx}",
+                mobile="5555555555",
+                doctor_id="D001",
+                doctor_name="Dr. Rajesh Kumar",
+                department="Cardiology",
+                appointment_date="2026-08-03",
+                appointment_time=t,
+                status="Booked",
+                created_at="2026-07-30 12:00:00"
+            ))
+        db.commit()
         print(f"\nBooked remaining slots: {slots_to_book}.")
 
         res_mon_fb = service.get_available_slots("D001", "2026-08-03")
@@ -116,9 +130,7 @@ def test_availability_service():
         print("\nAll AvailabilityService tests passed successfully!")
 
     finally:
-        if os.path.exists(test_db):
-            os.remove(test_db)
-            print("\nRemoved test database file.")
+        db.close()
 
 if __name__ == "__main__":
     test_availability_service()

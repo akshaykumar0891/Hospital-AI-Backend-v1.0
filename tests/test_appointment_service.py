@@ -1,34 +1,44 @@
 import sys
-import os
-import shutil
 from pathlib import Path
 from pydantic import ValidationError
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 # Add project root to path
-sys.path.append("d:/hospital-ai")
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from database.excel_manager import ExcelManager
+from database.database import Base
+from database.models import Doctor, Appointment
 from services.availability_service import AvailabilityService
 from services.booking_service import BookingService
 from services.appointment_service import AppointmentService
 from models.appointment import AppointmentCreate, AppointmentReschedule
-from config import EXCEL_DB_PATH
 
 def test_appointment_service():
-    original_db = EXCEL_DB_PATH
-    test_db = original_db.parent / "hospital_data_test_appt_service.xlsx"
-
-    print(f"Original DB Path: {original_db}")
-    print(f"Test DB Path: {test_db}")
-
-    shutil.copy2(original_db, test_db)
-    print("Copied database to test database file.")
+    # Setup SQLite in-memory DB
+    engine = create_engine("sqlite:///:memory:")
+    SessionClass = sessionmaker(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    
+    db = SessionClass()
 
     try:
-        manager = ExcelManager(file_path=str(test_db))
-        avail = AvailabilityService(excel_manager=manager)
-        book_service = BookingService(excel_manager=manager, availability_service=avail)
-        appt_service = AppointmentService(excel_manager=manager, availability_service=avail)
+        # Seed doctor Rajesh Kumar (D001)
+        doc1 = Doctor(
+            doctor_id="D001",
+            doctor_name="Dr. Rajesh Kumar",
+            department="Cardiology",
+            available_days="Mon,Tue,Wed,Fri",
+            start_time="09:00",
+            end_time="13:00",
+            slot_duration=30
+        )
+        db.add(doc1)
+        db.commit()
+
+        avail = AvailabilityService(db)
+        book_service = BookingService(db, availability_service=avail)
+        appt_service = AppointmentService(db, availability_service=avail)
 
         # 1. Test Pydantic Validations
         print("\n--- 1. Testing Pydantic Model Validations ---")
@@ -65,8 +75,9 @@ def test_appointment_service():
         print("Cancellation response:", cancel_res)
         assert cancel_res["success"] is True
 
-        # Verify Excel fields
-        cancelled_appt = manager.get_appointment_by_id(appt_id)
+        # Verify DB fields
+        status_res = appt_service.get_appointment_status(appointment_id=appt_id)
+        cancelled_appt = status_res["appointments"][0]
         print("Cancelled Appointment Detail:", cancelled_appt)
         assert cancelled_appt["Status"] == "Cancelled"
         assert cancelled_appt["Cancelled At"] is not None
@@ -104,15 +115,16 @@ def test_appointment_service():
         print("Reschedule success response:", resched_res)
         assert resched_res["success"] is True
 
-        # Verify Excel details
-        resched_appt = manager.get_appointment_by_id(appt_id_2)
+        # Verify DB details
+        status_res2 = appt_service.get_appointment_status(appointment_id=appt_id_2)
+        resched_appt = status_res2["appointments"][0]
         print("Rescheduled Appointment Detail:", resched_appt)
         assert resched_appt["Status"] == "Rescheduled"
         assert resched_appt["Date"] == "2026-08-03"
         assert resched_appt["Time"] == "11:30"
         assert resched_appt["Updated At"] is not None
 
-        # Reschedule to a booked slot (try to reschedule Alice to Bob's 10:00 booked slot - wait Bob was at 09:00, let's book someone else at 10:00 first)
+        # Reschedule to a booked slot
         book_service.book_appointment({
             "patient_name": "Charlie",
             "mobile": "7777777777",
@@ -159,9 +171,7 @@ def test_appointment_service():
         print("\nAll AppointmentService integration tests passed successfully!")
 
     finally:
-        if os.path.exists(test_db):
-            os.remove(test_db)
-            print("\nRemoved test database file.")
+        db.close()
 
 if __name__ == "__main__":
     test_appointment_service()

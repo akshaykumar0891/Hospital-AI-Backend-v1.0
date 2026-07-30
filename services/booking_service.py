@@ -2,8 +2,8 @@ import logging
 import re
 from datetime import datetime
 from typing import Dict, Any, Optional, List
-
-from database.excel_manager import ExcelManager
+from sqlalchemy.orm import Session
+from database.models import Doctor, Appointment
 from services.availability_service import AvailabilityService
 from utils.id_generator import generate_appointment_id
 
@@ -11,9 +11,9 @@ from utils.id_generator import generate_appointment_id
 logger = logging.getLogger(__name__)
 
 class BookingService:
-    def __init__(self, excel_manager: Optional[ExcelManager] = None, availability_service: Optional[AvailabilityService] = None):
-        self.db = excel_manager or ExcelManager()
-        self.avail = availability_service or AvailabilityService(self.db)
+    def __init__(self, db: Session, availability_service: Optional[AvailabilityService] = None):
+        self.db = db
+        self.avail = availability_service or AvailabilityService(db)
 
     def normalize_time(self, time_str: str) -> str:
         """Normalizes time to HH:MM format."""
@@ -84,36 +84,41 @@ class BookingService:
         time_str = self.normalize_time(booking_data["time"])
 
         # 2. Verify Doctor Exists
-        doctor = self.db.get_doctor_by_name(doctor_name_input)
+        doctor = self.db.query(Doctor).filter(Doctor.doctor_name == doctor_name_input).first()
+        if not doctor:
+            # normalized check (ignoring Dr. prefix and case)
+            all_docs = self.db.query(Doctor).all()
+            query_norm = doctor_name_input.lower().replace("dr.", "").replace("dr", "").strip()
+            for d in all_docs:
+                doc_norm = d.doctor_name.lower().replace("dr.", "").replace("dr", "").strip()
+                if doc_norm == query_norm:
+                    doctor = d
+                    break
+
         if not doctor:
             logger.warning(f"Doctor '{doctor_name_input}' not found")
             return {"success": False, "message": f"Doctor '{doctor_name_input}' not found"}
 
-        doctor_id = doctor["Doctor ID"]
-        doctor_name = doctor["Doctor Name"]
-        department = doctor["Department"]
+        doctor_id = doctor.doctor_id
+        doctor_name = doctor.doctor_name
+        department = doctor.department
 
         # 3. Check for Duplicate Active Booking
         # Same doctor, same date, same time, and same patient mobile
-        existing_appointments = self.db.get_appointments()
-        for appt in existing_appointments:
-            appt_doc_id = str(appt.get("Doctor ID", "")).strip().lower()
-            appt_date = str(appt.get("Date", "")).strip()
-            appt_time = self.normalize_time(appt.get("Time", ""))
-            appt_mobile = self.normalize_mobile(appt.get("Mobile", ""))
-            appt_status = str(appt.get("Status", "")).strip().lower()
+        duplicate = self.db.query(Appointment).filter(
+            Appointment.doctor_id == doctor_id,
+            Appointment.appointment_date == date_str,
+            Appointment.appointment_time == time_str,
+            Appointment.mobile == mobile,
+            Appointment.status != "Cancelled"
+        ).first()
 
-            if (appt_doc_id == doctor_id.lower() and 
-                appt_date == date_str and 
-                appt_time == time_str and 
-                appt_mobile == mobile and 
-                appt_status != "cancelled"):
-                
-                logger.warning(f"Duplicate booking attempt detected for mobile {mobile}")
-                return {
-                    "success": False,
-                    "message": "An appointment already exists for this patient at the selected time."
-                }
+        if duplicate:
+            logger.warning(f"Duplicate booking attempt detected for mobile {mobile}")
+            return {
+                "success": False,
+                "message": "An appointment already exists for this patient at the selected time."
+            }
 
         # 4. Check Availability via AvailabilityService
         avail_res = self.avail.get_available_slots(doctor_id, date_str)
@@ -132,22 +137,24 @@ class BookingService:
             }
 
         # 5. Generate Professional Sequential ID
-        existing_ids = [appt.get("Appointment ID") for appt in existing_appointments if appt.get("Appointment ID")]
+        existing_ids = [a[0] for a in self.db.query(Appointment.appointment_id).all()]
         appt_id = generate_appointment_id(existing_ids)
 
         # 6. Save the Appointment
-        appointment_payload = {
-            "Appointment ID": appt_id,
-            "Patient Name": patient_name,
-            "Mobile": mobile,
-            "Doctor ID": doctor_id,
-            "Doctor Name": doctor_name,
-            "Department": department,
-            "Date": date_str,
-            "Time": time_str,
-            "Status": "Booked"
-        }
-        self.db.save_appointment(appointment_payload)
+        new_appt = Appointment(
+            appointment_id=appt_id,
+            patient_name=patient_name,
+            mobile=mobile,
+            doctor_id=doctor_id,
+            doctor_name=doctor_name,
+            department=department,
+            appointment_date=date_str,
+            appointment_time=time_str,
+            status="Booked",
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+        self.db.add(new_appt)
+        self.db.commit()
 
         logger.info(f"Successfully booked appointment {appt_id} for {patient_name}")
         return {
@@ -155,4 +162,5 @@ class BookingService:
             "appointment_id": appt_id,
             "message": "Appointment booked successfully."
         }
+
 

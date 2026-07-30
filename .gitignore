@@ -44,6 +44,9 @@ database/*test*.xlsx
 database/hospital_data_test*.xlsx
 *.xlsx.bak
 *.log
+*.db
+database/*.db
+
 
 # IDEs and editors
 .vscode/

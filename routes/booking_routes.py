@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Optional
 
-from database.excel_manager import ExcelManager
+
 from services.availability_service import AvailabilityService
 from services.booking_service import BookingService
 from services.appointment_service import AppointmentService
@@ -18,18 +18,19 @@ class AvailabilityRequest(BaseModel):
 class CancelRequest(BaseModel):
     appointment_id: str
 
-# Dependencies
-def get_excel_manager() -> ExcelManager:
-    return ExcelManager()
+from sqlalchemy.orm import Session
+from database.database import get_db
 
-def get_availability_service(db: ExcelManager = Depends(get_excel_manager)) -> AvailabilityService:
+# Dependencies
+def get_availability_service(db: Session = Depends(get_db)) -> AvailabilityService:
     return AvailabilityService(db)
 
-def get_booking_service(db: ExcelManager = Depends(get_excel_manager), avail: AvailabilityService = Depends(get_availability_service)) -> BookingService:
+def get_booking_service(db: Session = Depends(get_db), avail: AvailabilityService = Depends(get_availability_service)) -> BookingService:
     return BookingService(db, avail)
 
-def get_appointment_service(db: ExcelManager = Depends(get_excel_manager), avail: AvailabilityService = Depends(get_availability_service)) -> AppointmentService:
+def get_appointment_service(db: Session = Depends(get_db), avail: AvailabilityService = Depends(get_availability_service)) -> AppointmentService:
     return AppointmentService(db, avail)
+
 
 
 @router.post("/check-availability")
