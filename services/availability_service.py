@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from database.models import Appointment
 from services.doctor_service import DoctorService
+from utils.date_parser import parse_flexible_date
 from config import HOLIDAYS, APPOINTMENT_LIMITS_DAYS
 
 # Setup logging
@@ -98,16 +99,19 @@ class AvailabilityService:
     def get_available_slots(self, doctor_id: str, date_str: str) -> Dict[str, Any]:
         """
         Gets available slots for a doctor on a specific date, checking calendar,
-        holidays, and schedule logic.
+        holidays, and schedule logic. Supports flexible date keyword inputs.
         """
         doctor = self.doc_service.get_doctor_by_id(doctor_id)
         if not doctor:
             return {"status": "error", "message": f"Doctor with ID {doctor_id} not found"}
 
+        # Flexible Date parsing support
         try:
-            check_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        except ValueError:
-            return {"status": "error", "message": f"Invalid date format: {date_str}. Use YYYY-MM-DD"}
+            check_date = parse_flexible_date(date_str)
+            # Re-normalize date_str to standardized format YYYY-MM-DD
+            date_str = check_date.strftime("%Y-%m-%d")
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
 
         # 1. Check if date is a configured public/hospital holiday
         if date_str in HOLIDAYS:

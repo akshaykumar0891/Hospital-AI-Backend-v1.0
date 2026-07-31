@@ -9,7 +9,8 @@ from database.models import Doctor, Appointment
 from services.doctor_service import DoctorService
 from services.availability_service import AvailabilityService
 from utils.id_generator import generate_appointment_id
-from config import TIMEZONE, HOLIDAYS
+from utils.date_parser import parse_flexible_date, parse_flexible_time
+from config import TIMEZONE, HOLIDAYS, DEFAULT_START_TIME, DEFAULT_END_TIME
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -37,8 +38,10 @@ class BookingService:
 
     def validate_booking_inputs(self, data: Dict[str, Any]) -> None:
         """
-        Validates the inputs for creating a booking. Raises HTTPException if invalid.
+        Validates the inputs for creating a booking. Normalizes fields and checks time/date boundaries.
+        Raises HTTPException if invalid.
         """
+        # 1. Validate Patient Name
         patient_name = data.get("patient_name")
         if not patient_name or not str(patient_name).strip():
             raise HTTPException(
@@ -49,7 +52,11 @@ class BookingService:
                     "errors": ["The patient_name field is required and must not be blank."]
                 }
             )
+        # Sanitization: Strip and remove HTML/script injection tags
+        sanitized_name = re.sub(r"[<>\&\"\'/]", "", str(patient_name)).strip()
+        data["patient_name"] = sanitized_name
 
+        # 2. Validate Mobile
         mobile = data.get("mobile")
         if not mobile:
             raise HTTPException(
@@ -71,8 +78,9 @@ class BookingService:
                     "errors": ["Mobile number must contain at least 5 digits."]
                 }
             )
+        data["mobile"] = mobile_cleaned
 
-        # Date format validation YYYY-MM-DD
+        # 3. Flexible Date Parsing
         date_str = data.get("date")
         if not date_str:
             raise HTTPException(
@@ -84,31 +92,34 @@ class BookingService:
                 }
             )
         try:
-            check_date = datetime.strptime(str(date_str).strip(), "%Y-%m-%d").date()
-        except ValueError:
+            check_date = parse_flexible_date(str(date_str))
+            # Save parsed date and standardized string format back
+            data["date_parsed"] = check_date
+            data["date"] = check_date.strftime("%Y-%m-%d")
+        except ValueError as e:
             raise HTTPException(
                 status_code=400,
                 detail={
                     "success": False,
-                    "message": f"Invalid date format: '{date_str}'. Use YYYY-MM-DD",
-                    "errors": ["Date format must be YYYY-MM-DD"]
+                    "message": str(e),
+                    "errors": [str(e)]
                 }
             )
 
-        # Past Date Validation using configured Timezone
+        # 4. Past Date Validation using configured Timezone
         current_date_tz = datetime.now(ZoneInfo(TIMEZONE)).date()
-        if check_date < current_date_tz:
-            logger.warning(f"Booking validation failed: date {date_str} is in the past compared to today {current_date_tz}")
+        if data["date_parsed"] < current_date_tz:
+            logger.warning(f"Booking validation failed: date {data['date']} is in the past compared to today {current_date_tz}")
             raise HTTPException(
                 status_code=400,
                 detail={
                     "success": False,
-                    "message": f"Cannot book an appointment in the past (Date: {date_str}).",
-                    "errors": [f"Selected date '{date_str}' is prior to today's date '{current_date_tz.strftime('%Y-%m-%d')}'."]
+                    "message": f"Cannot book an appointment in the past (Date: {data['date']}).",
+                    "errors": [f"Selected date '{data['date']}' is prior to today's date '{current_date_tz.strftime('%Y-%m-%d')}'."]
                 }
             )
 
-        # Time format validation HH:MM (allow seconds and normalize)
+        # 5. Flexible Time Parsing
         time_str = data.get("time")
         if not time_str:
             raise HTTPException(
@@ -120,18 +131,27 @@ class BookingService:
                 }
             )
         try:
-            parts = str(time_str).strip().split(":")
-            if len(parts) < 2:
-                raise ValueError
-            int(parts[0])
-            int(parts[1])
-        except ValueError:
+            check_time_str = parse_flexible_time(str(time_str))
+            data["time"] = check_time_str
+        except ValueError as e:
             raise HTTPException(
                 status_code=400,
                 detail={
                     "success": False,
-                    "message": f"Invalid time format: '{time_str}'. Use HH:MM",
-                    "errors": ["Time format must be HH:MM"]
+                    "message": str(e),
+                    "errors": [str(e)]
+                }
+            )
+
+        # 6. Check Closed Hospital Hours Validation
+        if data["time"] < DEFAULT_START_TIME or data["time"] > DEFAULT_END_TIME:
+            logger.warning(f"Booking validation failed: Selected time {data['time']} is outside hospital hours {DEFAULT_START_TIME}-{DEFAULT_END_TIME}")
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "message": f"Hospital is closed at {data['time']}. Hospital hours: {DEFAULT_START_TIME} to {DEFAULT_END_TIME}.",
+                    "errors": [f"Selected slot time is outside the hospital operational window."]
                 }
             )
 
@@ -139,22 +159,27 @@ class BookingService:
         """
         Validates, checks availability, and books an appointment.
         """
-        patient_name = str(booking_data.get("patient_name", "")).strip()
-        logger.info(f"Received booking request for patient: {patient_name}")
-
-        # 1. Input Validation (raises HTTPException if invalid)
+        # 1. Input Validation and Normalization (raises HTTPException if invalid)
         self.validate_booking_inputs(booking_data)
 
-        mobile = self.normalize_mobile(booking_data["mobile"])
+        patient_name = booking_data["patient_name"]
+        mobile = booking_data["mobile"]
         doctor_name_input = booking_data.get("doctor_name")
         doctor_id_input = booking_data.get("doctor_id")
-        date_str = str(booking_data["date"]).strip()
-        time_str = self.normalize_time(booking_data["time"])
+        date_str = booking_data["date"]
+        time_str = booking_data["time"]
+
+        logger.info(f"Booking request verified: patient={patient_name}, doctor_id={doctor_id_input}, doctor_name={doctor_name_input}, date={date_str}, time={time_str}")
 
         # 2. Verify Doctor Exists (Checks id, name, or synonym resolve)
         doctor = None
         if doctor_id_input:
             doctor = self.db.query(Doctor).filter(Doctor.doctor_id == doctor_id_input).first()
+            if not doctor:
+                # Try flexible resolution for doctor ID
+                test_id_doc = self.doc_service.get_doctor_by_id(doctor_id_input)
+                if test_id_doc:
+                    doctor = self.db.query(Doctor).filter(Doctor.doctor_id == test_id_doc["Doctor ID"]).first()
         elif doctor_name_input:
             doctor = self.db.query(Doctor).filter(Doctor.doctor_name == doctor_name_input).first()
             if not doctor:
@@ -269,7 +294,7 @@ class BookingService:
 
         logger.info(f"Successfully booked appointment {appt_id} for {patient_name}")
         
-        # Standard Response Format payload matching the specifications
+        # Standard Response Format payload matching specifications
         return {
             "success": True,
             "message": "Appointment booked successfully.",

@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 from database.models import Appointment, Doctor
 from services.availability_service import AvailabilityService
 from services.doctor_service import DoctorService
-from config import TIMEZONE
+from utils.date_parser import parse_flexible_date, parse_flexible_time
+from config import TIMEZONE, DEFAULT_START_TIME, DEFAULT_END_TIME
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -93,9 +94,9 @@ class AppointmentService:
     ) -> Dict[str, Any]:
         """
         Updates target appointment's Date, Time, and optionally Doctor,
-        verifying slot availability first.
+        verifying slot availability first. Supports flexible date and time parsing.
         """
-        logger.info(f"Reschedule requested for Appointment ID {appointment_id} to {new_date} at {new_time}")
+        logger.info(f"Reschedule requested for Appointment ID {appointment_id} to '{new_date}' at '{new_time}'")
 
         appt = self.db.query(Appointment).filter(Appointment.appointment_id == appointment_id).first()
         if not appt:
@@ -120,46 +121,55 @@ class AppointmentService:
                 }
             )
 
-        # Date format validation
+        # Flexible Date parsing
         try:
-            check_date = datetime.strptime(new_date.strip(), "%Y-%m-%d").date()
-        except ValueError:
+            check_date = parse_flexible_date(new_date)
+            normalized_new_date = check_date.strftime("%Y-%m-%d")
+        except ValueError as e:
             raise HTTPException(
                 status_code=400,
                 detail={
                     "success": False,
-                    "message": f"Invalid date format: '{new_date}'. Use YYYY-MM-DD",
-                    "errors": ["Date format must be YYYY-MM-DD"]
+                    "message": str(e),
+                    "errors": [str(e)]
                 }
             )
 
         # Past Date Validation using configured Timezone
         current_date_tz = datetime.now(ZoneInfo(TIMEZONE)).date()
         if check_date < current_date_tz:
-            logger.warning(f"Reschedule validation failed: date {new_date} is in the past compared to today {current_date_tz}")
+            logger.warning(f"Reschedule validation failed: date {normalized_new_date} is in the past compared to today {current_date_tz}")
             raise HTTPException(
                 status_code=400,
                 detail={
                     "success": False,
-                    "message": f"Cannot reschedule to a past date (Date: {new_date}).",
-                    "errors": [f"Selected date '{new_date}' is prior to today's date '{current_date_tz.strftime('%Y-%m-%d')}'."]
+                    "message": f"Cannot reschedule to a past date (Date: {normalized_new_date}).",
+                    "errors": [f"Selected date '{normalized_new_date}' is prior to today's date '{current_date_tz.strftime('%Y-%m-%d')}'."]
                 }
             )
 
-        # Time format validation
+        # Flexible Time parsing
         try:
-            parts = new_time.split(":")
-            if len(parts) < 2:
-                raise ValueError
-            int(parts[0])
-            int(parts[1])
-        except ValueError:
+            new_time_norm = parse_flexible_time(new_time)
+        except ValueError as e:
             raise HTTPException(
                 status_code=400,
                 detail={
                     "success": False,
-                    "message": f"Invalid time format: '{new_time}'. Use HH:MM",
-                    "errors": ["Time format must be HH:MM"]
+                    "message": str(e),
+                    "errors": [str(e)]
+                }
+            )
+
+        # Check Closed Hospital Hours boundary
+        if new_time_norm < DEFAULT_START_TIME or new_time_norm > DEFAULT_END_TIME:
+            logger.warning(f"Reschedule validation failed: Selected time {new_time_norm} is outside hospital hours {DEFAULT_START_TIME}-{DEFAULT_END_TIME}")
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "message": f"Hospital is closed at {new_time_norm}. Hospital hours: {DEFAULT_START_TIME} to {DEFAULT_END_TIME}.",
+                    "errors": [f"Selected slot time is outside the hospital operational window."]
                 }
             )
 
@@ -167,6 +177,11 @@ class AppointmentService:
         doctor = None
         if doctor_id_input:
             doctor = self.db.query(Doctor).filter(Doctor.doctor_id == doctor_id_input).first()
+            if not doctor:
+                # Flexible lookup
+                test_id_doc = self.doc_service.get_doctor_by_id(doctor_id_input)
+                if test_id_doc:
+                    doctor = self.db.query(Doctor).filter(Doctor.doctor_id == test_id_doc["Doctor ID"]).first()
         elif doctor_name_input:
             doctor = self.db.query(Doctor).filter(Doctor.doctor_name == doctor_name_input).first()
             if not doctor:
@@ -193,24 +208,23 @@ class AppointmentService:
 
         current_date = appt.appointment_date
         current_time = self.normalize_time(appt.appointment_time)
-        new_time_norm = self.normalize_time(new_time)
 
         # If date, time, and doctor are identical, return success with no action
-        if current_date == new_date and current_time == new_time_norm and appt.doctor_id == doctor_id:
+        if current_date == normalized_new_date and current_time == new_time_norm and appt.doctor_id == doctor_id:
             return {
                 "success": True,
                 "message": "Appointment rescheduled successfully.",
                 "data": {
                     "appointment_id": appointment_id,
                     "old_slot": {"date": current_date, "time": current_time},
-                    "new_slot": {"date": new_date, "time": new_time_norm},
+                    "new_slot": {"date": normalized_new_date, "time": new_time_norm},
                     "doctor_name": doctor_name
                 },
                 "errors": []
             }
 
         # Validate availability using AvailabilityService
-        avail_res = self.avail.get_available_slots(doctor_id, new_date)
+        avail_res = self.avail.get_available_slots(doctor_id, normalized_new_date)
         if avail_res.get("status") == "error":
             raise HTTPException(
                 status_code=400,
@@ -239,7 +253,7 @@ class AppointmentService:
 
         available_slots = avail_res.get("available_slots", [])
         if new_time_norm not in available_slots:
-            logger.warning(f"Reschedule failed: Slot {new_time_norm} is unavailable for {doctor_name} on {new_date}")
+            logger.warning(f"Reschedule failed: Slot {new_time_norm} is unavailable for {doctor_name} on {normalized_new_date}")
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -254,7 +268,7 @@ class AppointmentService:
             )
 
         # Update reschedule coordinates in database
-        appt.appointment_date = new_date
+        appt.appointment_date = normalized_new_date
         appt.appointment_time = new_time_norm
         appt.doctor_id = doctor_id
         appt.doctor_name = doctor_name
@@ -265,7 +279,7 @@ class AppointmentService:
         appt.updated_at = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
         self.db.commit()
 
-        logger.info(f"Successfully rescheduled appointment {appointment_id} to {new_date} {new_time_norm}")
+        logger.info(f"Successfully rescheduled appointment {appointment_id} to {normalized_new_date} {new_time_norm}")
         return {
             "success": True,
             "message": "Appointment rescheduled successfully.",
@@ -276,7 +290,7 @@ class AppointmentService:
                     "time": current_time
                 },
                 "new_slot": {
-                    "date": new_date,
+                    "date": normalized_new_date,
                     "time": new_time_norm
                 },
                 "doctor_name": doctor_name
@@ -286,8 +300,7 @@ class AppointmentService:
 
     def get_appointment_status(self, appointment_id: Optional[str] = None, mobile: Optional[str] = None) -> Dict[str, Any]:
         """
-        Retrieves appointment matching either specific ID or specific mobile,
-        formatting response back to original list formats.
+        Retrieves appointment matching either specific ID or specific mobile.
         """
         if not appointment_id and not mobile:
             raise HTTPException(

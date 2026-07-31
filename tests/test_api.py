@@ -186,6 +186,22 @@ def test_fastapi_endpoints():
         appt_id = res.json()["data"]["appointment"]["appointment_id"]
         assert appt_id.startswith("APT-")
 
+        # Test book using flexible parameters: "next monday", "9:30 AM", "Rajesh"
+        print("\n--- 5b. Testing POST /api/v1/book-appointment with flexible inputs ---")
+        book_payload_flex = {
+            "patient_name": "FlexPatient",
+            "mobile": "9992223334",
+            "doctor_name": "Rajesh",
+            "date": "next monday",
+            "time": "9:30 AM"
+        }
+        res_flex = client.post("/api/v1/book-appointment", json=book_payload_flex)
+        print("Flexible book result:", res_flex.json())
+        assert res_flex.status_code == 200
+        assert res_flex.json()["success"] is True
+        assert res_flex.json()["data"]["appointment"]["doctor_name"] == "Dr. Rajesh Kumar"
+        assert res_flex.json()["data"]["appointment"]["time"] == "09:30"
+
         # Duplicate check
         res_dup = client.post("/api/v1/book-appointment", json=book_payload)
         print("Duplicate book result:", res_dup.json())
