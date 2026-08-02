@@ -36,6 +36,8 @@ init_db()
 
 from routes.doctor_routes import router as doctor_router
 from routes.booking_routes import router as booking_router
+from routes.dashboard_routes import router as dashboard_router
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(
     title="Hospital AI Appointment Manager",
@@ -155,6 +157,10 @@ async def generic_exception_handler(request: Request, exc: Exception):
 # Include routes
 app.include_router(doctor_router, prefix="/api/v1", tags=["Doctors"])
 app.include_router(booking_router, prefix="/api/v1", tags=["Bookings"])
+app.include_router(dashboard_router, prefix="/api/v1", tags=["Dashboard"])
+
+# Serve Static Frontend Admin Panel
+app.mount("/admin", StaticFiles(directory="frontend", html=True), name="admin")
 
 @app.get(
     "/api/v1/ai-capabilities",

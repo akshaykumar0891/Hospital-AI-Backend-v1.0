@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from pydantic import ValidationError
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 

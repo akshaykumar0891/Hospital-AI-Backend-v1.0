@@ -47,25 +47,15 @@ def parse_flexible_date(date_input: str) -> date:
                 days_ahead = 7
             return today_tz + timedelta(days=days_ahead)
 
-    # Try parsing YYYY-MM-DD directly
+    # Only accept documented formats: YYYY-MM-DD and natural expressions
     try:
-        # Standard format parser
         return datetime.strptime(cleaned, "%Y-%m-%d").date()
     except ValueError:
-        pass
-
-    # Alternative separators parser (e.g., YYYY/MM/DD or DD-MM-YYYY)
-    for fmt in ("%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(cleaned, fmt).date()
-        except ValueError:
-            continue
-
-    logger.warning(f"Failed to parse flexible date: '{date_input}'")
-    raise ValueError(
-        f"Invalid date format or keyword: '{date_input}'. "
-        "Supported: 'today', 'tomorrow', 'next <weekday>', or 'YYYY-MM-DD'."
-    )
+        logger.warning(f"Failed to parse flexible date: '{date_input}'")
+        raise ValueError(
+            f"Invalid date format or keyword: '{date_input}'. "
+            "Supported: 'today', 'tomorrow', 'next <weekday>', or 'YYYY-MM-DD'."
+        )
 
 def parse_flexible_time(time_input: str) -> str:
     """

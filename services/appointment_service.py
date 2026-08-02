@@ -366,5 +366,6 @@ class AppointmentService:
             "data": {
                 "appointments": mapped_appts
             },
+            "appointments": mapped_appts,
             "errors": []
         }

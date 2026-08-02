@@ -1,6 +1,8 @@
 from pydantic import BaseModel, Field, model_validator
 from typing import Optional
 
+from utils.date_parser import parse_flexible_date, parse_flexible_time
+
 class Appointment(BaseModel):
     appointment_id: str = Field(
         alias="Appointment ID", 
@@ -106,9 +108,22 @@ class AppointmentCreate(BaseModel):
     )
 
     @model_validator(mode="after")
-    def check_doctor_provided(self) -> 'AppointmentCreate':
+    def validate_inputs(self) -> 'AppointmentCreate':
         if not self.doctor_id and not self.doctor_name:
             raise ValueError("Must provide either doctor_id or doctor_name to identify the doctor.")
+
+        try:
+            parsed_date = parse_flexible_date(self.date)
+        except ValueError as e:
+            raise ValueError(str(e))
+
+        try:
+            normalized_time = parse_flexible_time(self.time)
+        except ValueError as e:
+            raise ValueError(str(e))
+
+        self.date = parsed_date.strftime("%Y-%m-%d")
+        self.time = normalized_time
         return self
 
 class AppointmentReschedule(BaseModel):
@@ -140,3 +155,18 @@ class AppointmentReschedule(BaseModel):
         description="Optional new doctor name search query (if transferring the appointment).",
         examples=["Dr. Priya Sharma"]
     )
+
+    @model_validator(mode="after")
+    def validate_inputs(self) -> 'AppointmentReschedule':
+        try:
+            parsed_date = parse_flexible_date(self.new_date)
+        except ValueError as e:
+            raise ValueError(str(e))
+
+        try:
+            self.new_time = parse_flexible_time(self.new_time)
+        except ValueError as e:
+            raise ValueError(str(e))
+
+        self.new_date = parsed_date.strftime("%Y-%m-%d")
+        return self
