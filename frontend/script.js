@@ -4,7 +4,9 @@ let currentState = {
     appointmentsPage: 1,
     appointmentsLimit: 10,
     doctors: [],
-    syncInterval: null
+    syncInterval: null,
+    knownAppointmentIds: new Set(),
+    isInitialLoad: true
 };
 
 // API Endpoints Prefix
@@ -19,6 +21,7 @@ const DOM = {
     liveDate: document.getElementById("live-date"),
     refreshBtn: document.getElementById("refresh-btn"),
     loadingSpinner: document.getElementById("loading-spinner"),
+    toastContainer: document.getElementById("toast-container"),
     
     // Stats Elements
     statToday: document.getElementById("stat-today"),
@@ -73,7 +76,9 @@ const DOM = {
 document.addEventListener("DOMContentLoaded", () => {
     updateLiveDate();
     setupEventListeners();
-    loadAllData();
+    loadAllData(true).then(() => {
+        currentState.isInitialLoad = false;
+    });
     startAutoRefresh();
 });
 
@@ -91,7 +96,7 @@ function hideSpinner() {
     DOM.loadingSpinner.classList.add("hidden");
 }
 
-// Start Auto Refresh Loop (Every 30 seconds)
+// Start Auto Refresh Loop (Every 5 seconds for real-time AI Agent updates!)
 function startAutoRefresh() {
     if (currentState.syncInterval) {
         clearInterval(currentState.syncInterval);
@@ -99,7 +104,7 @@ function startAutoRefresh() {
     currentState.syncInterval = setInterval(() => {
         logger("Auto refreshing dashboard state...");
         loadAllData(false); // Silent refresh (no loading spinner overlay)
-    }, 30000);
+    }, 5000);
 }
 
 // Debug logs
@@ -123,6 +128,74 @@ async function loadAllData(displayLoading = true) {
     } finally {
         if (displayLoading) hideSpinner();
     }
+}
+
+// ----------------------------------------------------
+// TOAST NOTIFICATIONS SYSTEM
+// ----------------------------------------------------
+function showToast(title, message, type = "info") {
+    const toast = document.createElement("div");
+    toast.className = `toast toast-${type}`;
+    
+    let iconClass = "fa-info-circle";
+    if (type === "success") iconClass = "fa-check-circle";
+    if (type === "warning") iconClass = "fa-exclamation-triangle";
+    
+    toast.innerHTML = `
+        <div class="toast-icon">
+            <i class="fa-solid ${iconClass}"></i>
+        </div>
+        <div class="toast-content">
+            <h4>${title}</h4>
+            <p>${message}</p>
+        </div>
+        <button class="toast-close">&times;</button>
+    `;
+    
+    // Close button event
+    toast.querySelector(".toast-close").addEventListener("click", () => {
+        toast.style.opacity = "0";
+        toast.style.transform = "translateX(100%)";
+        setTimeout(() => toast.remove(), 300);
+    });
+    
+    DOM.toastContainer.appendChild(toast);
+    
+    // Auto remove after 5 seconds
+    setTimeout(() => {
+        if (toast.parentNode) {
+            toast.style.opacity = "0";
+            toast.style.transform = "translateX(100%)";
+            setTimeout(() => toast.remove(), 300);
+        }
+    }, 5000);
+}
+
+// Check for new appointments to show Toast notification
+function checkForNewAppointments(appointments) {
+    if (currentState.isInitialLoad) {
+        // Just record existing IDs on first load
+        appointments.forEach(appt => {
+            currentState.knownAppointmentIds.add(appt.appointment_id);
+        });
+        return [];
+    }
+    
+    const newAppointments = [];
+    appointments.forEach(appt => {
+        if (!currentState.knownAppointmentIds.has(appt.appointment_id)) {
+            currentState.knownAppointmentIds.add(appt.appointment_id);
+            newAppointments.push(appt);
+            
+            // Trigger Toast Alert!
+            showToast(
+                "New Booking Received! 📞", 
+                `Patient ${appt.patient_name} has booked with ${appt.doctor_name} for ${appt.appointment_date} at ${appt.appointment_time}.`, 
+                "success"
+            );
+        }
+    });
+    return newAppointments;
 }
 
 // ----------------------------------------------------
@@ -163,7 +236,7 @@ async function fetchDoctorsList() {
 
 // Populate Doctors Filter dropdown list
 function populateDoctorFilters(doctors) {
-    // Keep initial option
+    const currentVal = DOM.filterDoctor.value;
     DOM.filterDoctor.innerHTML = '<option value="">All Doctors</option>';
     doctors.forEach(doc => {
         const opt = document.createElement("option");
@@ -171,6 +244,7 @@ function populateDoctorFilters(doctors) {
         opt.textContent = doc.doctor_name;
         DOM.filterDoctor.appendChild(opt);
     });
+    DOM.filterDoctor.value = currentVal;
 }
 
 // Render Doctors Cards Grid
@@ -219,14 +293,18 @@ async function fetchRecentAppointments() {
         const res = await fetch(`${API_PREFIX}/dashboard/recent`);
         const json = await res.json();
         if (json.success) {
-            renderRecentTable(json.data);
+            // Check for new bookings to notify
+            const newAppts = checkForNewAppointments(json.data);
+            const newIdsSet = new Set(newAppts.map(a => a.appointment_id));
+            
+            renderRecentTable(json.data, newIdsSet);
         }
     } catch (err) {
         logger("Failed to load recent appointments list.", err);
     }
 }
 
-function renderRecentTable(appointments) {
+function renderRecentTable(appointments, newIdsSet = new Set()) {
     DOM.recentTableBody.innerHTML = "";
     if (appointments.length === 0) {
         DOM.recentEmpty.classList.remove("hidden");
@@ -238,6 +316,11 @@ function renderRecentTable(appointments) {
         const row = document.createElement("tr");
         row.style.cursor = "pointer";
         row.addEventListener("click", () => showAppointmentDetail(appt.appointment_id));
+        
+        // Highlight row if it is a newly detected appointment
+        if (newIdsSet.has(appt.appointment_id)) {
+            row.className = "new-row-flash";
+        }
         
         row.innerHTML = `
             <td><strong>#${appt.appointment_id}</strong></td>
@@ -281,7 +364,11 @@ async function fetchAppointments() {
         const res = await fetch(url);
         const json = await res.json();
         if (json.success) {
-            renderAppointmentsTable(json.data.appointments);
+            // Also notify any new ones here if they fall in the results
+            const newAppts = checkForNewAppointments(json.data.appointments);
+            const newIdsSet = new Set(newAppts.map(a => a.appointment_id));
+
+            renderAppointmentsTable(json.data.appointments, newIdsSet);
             updatePaginationControls(json.data);
         }
     } catch (err) {
@@ -289,7 +376,7 @@ async function fetchAppointments() {
     }
 }
 
-function renderAppointmentsTable(appointments) {
+function renderAppointmentsTable(appointments, newIdsSet = new Set()) {
     DOM.appointmentsTableBody.innerHTML = "";
     if (appointments.length === 0) {
         DOM.appointmentsEmpty.classList.remove("hidden");
@@ -302,6 +389,9 @@ function renderAppointmentsTable(appointments) {
 
     appointments.forEach(appt => {
         const row = document.createElement("tr");
+        if (newIdsSet.has(appt.appointment_id)) {
+            row.className = "new-row-flash";
+        }
         row.innerHTML = `
             <td><strong>#${appt.appointment_id}</strong></td>
             <td>${appt.patient_name}</td>
