@@ -2,9 +2,9 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
-from database.models import Doctor, Appointment
+from database.models import Doctor, Appointment, HospitalInfo
 from config import TIMEZONE
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,8 @@ class DashboardService:
 
     def get_stats(self) -> Dict[str, int]:
         """
-        Calculates metric statistics for the admin dashboard panel dashboard.
+        Calculates metric statistics for the admin dashboard panel dashboard,
+        including live patient count and revenue estimates.
         """
         tz = ZoneInfo(TIMEZONE)
         today_str = datetime.now(tz).strftime("%Y-%m-%d")
@@ -49,14 +50,23 @@ class DashboardService:
             # 5. Total Doctors
             total_doctors = self.db.query(Doctor).count()
 
-            logger.info(f"Dashboard stats calculated: today={today_count}, upcoming={upcoming_count}, cancelled={cancelled_count}, completed={completed_count}, doctors={total_doctors}")
+            # 6. Total Unique Patients (based on unique mobile numbers)
+            total_patients = self.db.query(Appointment.mobile).distinct().count()
+
+            # 7. Estimated Revenue (Placeholder: $100 per completed booking)
+            active_count = self.db.query(Appointment).filter(Appointment.status != "Cancelled").count()
+            revenue = active_count * 100
+
+            logger.info(f"Dashboard stats calculated: today={today_count}, upcoming={upcoming_count}, cancelled={cancelled_count}, completed={completed_count}, doctors={total_doctors}, patients={total_patients}, revenue={revenue}")
 
             return {
                 "today_appointments": today_count,
                 "upcoming_appointments": upcoming_count,
                 "cancelled_appointments": cancelled_count,
                 "completed_appointments": completed_count,
-                "total_doctors": total_doctors
+                "total_doctors": total_doctors,
+                "total_patients": total_patients,
+                "estimated_revenue": revenue
             }
         except Exception as e:
             logger.error(f"Error computing dashboard stats: {e}", exc_info=True)
@@ -90,7 +100,8 @@ class DashboardService:
                     or_(
                         Appointment.patient_name.ilike(search_term),
                         Appointment.mobile.ilike(search_term),
-                        Appointment.appointment_id.ilike(search_term)
+                        Appointment.appointment_id.ilike(search_term),
+                        Appointment.doctor_name.ilike(search_term)
                     )
                 )
 
@@ -169,7 +180,8 @@ class DashboardService:
             "department": doc.department,
             "available_days": doc.available_days,
             "start_time": doc.start_time,
-            "end_time": doc.end_time
+            "end_time": doc.end_time,
+            "slot_duration": doc.slot_duration
         } for doc in docs]
 
     def get_recent_appointments(self) -> List[Dict[str, Any]]:
@@ -177,7 +189,6 @@ class DashboardService:
         Retrieves the last 10 booked appointments.
         """
         try:
-            # Query the 10 newest appointments (excluding Cancelled if desired, or just last 10 booked)
             appts = self.db.query(Appointment).order_by(
                 Appointment.created_at.desc(),
                 Appointment.appointment_date.desc(),
@@ -197,4 +208,184 @@ class DashboardService:
             } for a in appts]
         except Exception as e:
             logger.error(f"Error querying recent appointments: {e}", exc_info=True)
+            raise e
+
+    def get_unique_patients(self, page: int = 1, limit: int = 10, search: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Retrieves unique patients list grouped by name and mobile.
+        """
+        tz = ZoneInfo(TIMEZONE)
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+
+        try:
+            query = self.db.query(
+                Appointment.patient_name,
+                Appointment.mobile,
+                func.count(Appointment.appointment_id).label("total_appointments"),
+                func.max(Appointment.appointment_date).label("last_visit")
+            ).group_by(Appointment.patient_name, Appointment.mobile)
+
+            if search:
+                search_term = f"%{search.strip()}%"
+                query = query.filter(
+                    or_(
+                        Appointment.patient_name.ilike(search_term),
+                        Appointment.mobile.ilike(search_term)
+                    )
+                )
+
+            subq = query.subquery()
+            total = self.db.query(func.count()).select_from(subq).scalar() or 0
+            query = query.order_by(func.max(Appointment.appointment_date).desc())
+
+            offset = (page - 1) * limit
+            results = query.offset(offset).limit(limit).all()
+
+            patients = []
+            for r in results:
+                p_name, p_mobile, count, last_visit = r
+                
+                has_active = self.db.query(Appointment).filter(
+                    Appointment.patient_name == p_name,
+                    Appointment.mobile == p_mobile,
+                    Appointment.status != "Cancelled",
+                    Appointment.appointment_date >= today_str
+                ).first() is not None
+
+                patients.append({
+                    "patient_name": p_name,
+                    "mobile": int(p_mobile) if p_mobile.isdigit() else p_mobile,
+                    "total_appointments": count,
+                    "last_visit": last_visit,
+                    "status": "Active" if has_active else "Regular"
+                })
+
+            total_pages = (total + limit - 1) // limit if total > 0 else 0
+
+            return {
+                "patients": patients,
+                "total": total,
+                "page": page,
+                "limit": limit,
+                "total_pages": total_pages
+            }
+        except Exception as e:
+            logger.error(f"Error querying patients: {e}", exc_info=True)
+            raise e
+
+    def delete_patient(self, patient_name: str, mobile: str) -> bool:
+        """
+        Soft-deletes all appointments matching the patient's name and mobile.
+        """
+        tz = ZoneInfo(TIMEZONE)
+        now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+
+        try:
+            count = self.db.query(Appointment).filter(
+                Appointment.patient_name == patient_name,
+                Appointment.mobile == mobile
+            ).count()
+
+            if count == 0:
+                logger.warning(f"No appointments found to cancel/delete for patient '{patient_name}' and mobile '{mobile}'")
+                return False
+
+            self.db.query(Appointment).filter(
+                Appointment.patient_name == patient_name,
+                Appointment.mobile == mobile
+            ).update({
+                Appointment.status: "Cancelled",
+                Appointment.cancelled_at: now_str
+            }, synchronize_session=False)
+
+            self.db.commit()
+            logger.info(f"Successfully soft-deleted {count} appointment(s) for patient '{patient_name}'")
+            return True
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error deleting patient appointments: {e}", exc_info=True)
+            raise e
+
+    def update_doctor(self, doctor_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Updates details of an existing doctor schedule profile.
+        """
+        doc_id = doctor_data.get("doctor_id")
+        doc = self.db.query(Doctor).filter(Doctor.doctor_id == doc_id).first()
+        if not doc:
+            return None
+
+        try:
+            doc.doctor_name = doctor_data.get("doctor_name", doc.doctor_name)
+            doc.department = doctor_data.get("department", doc.department)
+            doc.available_days = doctor_data.get("available_days", doc.available_days)
+            doc.start_time = doctor_data.get("start_time", doc.start_time)
+            doc.end_time = doctor_data.get("end_time", doc.end_time)
+            doc.slot_duration = int(doctor_data.get("slot_duration", doc.slot_duration))
+            
+            self.db.commit()
+            logger.info(f"Successfully updated doctor {doc_id} profile details.")
+            return {
+                "doctor_id": doc.doctor_id,
+                "doctor_name": doc.doctor_name,
+                "department": doc.department,
+                "available_days": doc.available_days,
+                "start_time": doc.start_time,
+                "end_time": doc.end_time,
+                "slot_duration": doc.slot_duration
+            }
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error updating doctor {doc_id} details: {e}")
+            raise e
+
+    def delete_doctor(self, doctor_id: str) -> bool:
+        """
+        Deletes a doctor profile and cascades the cancellation of all associated appointments.
+        """
+        doc = self.db.query(Doctor).filter(Doctor.doctor_id == doctor_id).first()
+        if not doc:
+            return False
+
+        try:
+            tz = ZoneInfo(TIMEZONE)
+            now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+
+            # Soft-delete all appointments associated with this doctor first
+            self.db.query(Appointment).filter(
+                Appointment.doctor_id == doctor_id
+            ).update({
+                Appointment.status: "Cancelled",
+                Appointment.cancelled_at: now_str
+            }, synchronize_session=False)
+
+            # Physically remove the doctor profile row
+            self.db.delete(doc)
+            self.db.commit()
+            logger.info(f"Successfully deleted doctor {doctor_id} and cancelled all their scheduled appointments.")
+            return True
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error deleting doctor {doctor_id}: {e}")
+            raise e
+
+    def update_hospital_info(self, info_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Updates hospital metadata keys in the HospitalInfo database table.
+        """
+        try:
+            for key, value in info_data.items():
+                # Query row
+                row = self.db.query(HospitalInfo).filter(HospitalInfo.key == key).first()
+                if row:
+                    row.value = str(value)
+                else:
+                    self.db.add(HospitalInfo(key=key, value=str(value)))
+            
+            self.db.commit()
+            logger.info("Successfully updated hospital settings configurations.")
+            return info_data
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error updating hospital configuration keys: {e}")
             raise e
