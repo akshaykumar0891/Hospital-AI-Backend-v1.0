@@ -275,35 +275,80 @@ class DashboardService:
 
     def delete_patient(self, patient_name: str, mobile: str) -> bool:
         """
-        Soft-deletes all appointments matching the patient's name and mobile.
+        Physically deletes all appointments matching the patient's name and mobile
+        from PostgreSQL (Supabase) so they disappear completely.
         """
-        tz = ZoneInfo(TIMEZONE)
-        now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
-
         try:
+            # Query count to verify existence
             count = self.db.query(Appointment).filter(
                 Appointment.patient_name == patient_name,
                 Appointment.mobile == mobile
             ).count()
 
             if count == 0:
-                logger.warning(f"No appointments found to cancel/delete for patient '{patient_name}' and mobile '{mobile}'")
+                logger.warning(f"No appointments found to delete for patient '{patient_name}' and mobile '{mobile}'")
                 return False
 
+            # Perform physical delete (db.delete)
             self.db.query(Appointment).filter(
                 Appointment.patient_name == patient_name,
                 Appointment.mobile == mobile
-            ).update({
-                Appointment.status: "Cancelled",
-                Appointment.cancelled_at: now_str
-            }, synchronize_session=False)
+            ).delete(synchronize_session=False)
 
             self.db.commit()
-            logger.info(f"Successfully soft-deleted {count} appointment(s) for patient '{patient_name}'")
+            logger.info(f"Successfully physically deleted {count} appointment(s) for patient '{patient_name}' from Supabase.")
             return True
         except Exception as e:
             self.db.rollback()
             logger.error(f"Error deleting patient appointments: {e}", exc_info=True)
+            raise e
+
+    def create_doctor(self, doctor_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Registers a new doctor profile, auto-generating a unique sequential Dxxx ID if not provided.
+        """
+        doc_id = doctor_data.get("doctor_id")
+        
+        # Auto generate doctor ID if blank
+        if not doc_id:
+            docs = self.db.query(Doctor.doctor_id).all()
+            max_num = 0
+            for d_tuple in docs:
+                d_id = d_tuple[0]
+                if d_id.startswith("D"):
+                    try:
+                        num = int(d_id[1:])
+                        if num > max_num:
+                            max_num = num
+                    except ValueError:
+                        pass
+            doc_id = f"D{max_num + 1:03d}"
+
+        try:
+            new_doc = Doctor(
+                doctor_id=doc_id,
+                doctor_name=doctor_data.get("doctor_name"),
+                department=doctor_data.get("department"),
+                available_days=doctor_data.get("available_days"),
+                start_time=doctor_data.get("start_time"),
+                end_time=doctor_data.get("end_time"),
+                slot_duration=int(doctor_data.get("slot_duration", 30))
+            )
+            self.db.add(new_doc)
+            self.db.commit()
+            logger.info(f"Successfully registered new doctor {doc_id} - {new_doc.doctor_name}")
+            return {
+                "doctor_id": new_doc.doctor_id,
+                "doctor_name": new_doc.doctor_name,
+                "department": new_doc.department,
+                "available_days": new_doc.available_days,
+                "start_time": new_doc.start_time,
+                "end_time": new_doc.end_time,
+                "slot_duration": new_doc.slot_duration
+            }
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error registering new doctor profile: {e}")
             raise e
 
     def update_doctor(self, doctor_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -341,28 +386,22 @@ class DashboardService:
 
     def delete_doctor(self, doctor_id: str) -> bool:
         """
-        Deletes a doctor profile and cascades the cancellation of all associated appointments.
+        Physically deletes a doctor profile and cascades physical deletion to all associated appointments.
         """
         doc = self.db.query(Doctor).filter(Doctor.doctor_id == doctor_id).first()
         if not doc:
             return False
 
         try:
-            tz = ZoneInfo(TIMEZONE)
-            now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
-
-            # Soft-delete all appointments associated with this doctor first
+            # Physically delete all appointments associated with this doctor first
             self.db.query(Appointment).filter(
                 Appointment.doctor_id == doctor_id
-            ).update({
-                Appointment.status: "Cancelled",
-                Appointment.cancelled_at: now_str
-            }, synchronize_session=False)
+            ).delete(synchronize_session=False)
 
             # Physically remove the doctor profile row
             self.db.delete(doc)
             self.db.commit()
-            logger.info(f"Successfully deleted doctor {doctor_id} and cancelled all their scheduled appointments.")
+            logger.info(f"Successfully physically deleted doctor {doctor_id} and all associated appointments from Supabase.")
             return True
         except Exception as e:
             self.db.rollback()
@@ -375,7 +414,6 @@ class DashboardService:
         """
         try:
             for key, value in info_data.items():
-                # Query row
                 row = self.db.query(HospitalInfo).filter(HospitalInfo.key == key).first()
                 if row:
                     row.value = str(value)

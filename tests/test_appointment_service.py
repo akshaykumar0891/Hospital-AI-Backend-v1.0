@@ -23,6 +23,21 @@ def test_appointment_service():
     
     db = SessionClass()
 
+    # Compute a valid booking date dynamically
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    HOLIDAYS = ["2026-08-15", "2026-01-26", "2026-10-02", "2026-12-25"]
+    tz = ZoneInfo("Asia/Kolkata")
+    future_date = None
+    for i in range(1, 15):
+        d = datetime.now(tz) + timedelta(days=i)
+        date_str = d.strftime("%Y-%m-%d")
+        if date_str not in HOLIDAYS and d.weekday() in [0, 1, 2, 4]:
+            future_date = date_str
+            break
+    if not future_date:
+        future_date = "2026-08-17"
+
     try:
         # Seed doctor Rajesh Kumar (D001)
         doc1 = Doctor(
@@ -48,7 +63,7 @@ def test_appointment_service():
             "patient_name": "Bob",
             "mobile": "1234567890",
             "doctor_name": "Dr. Rajesh Kumar",
-            "date": "2026-08-03",
+            "date": future_date,
             "time": "09:00"
         }
         create_model = AppointmentCreate(**valid_create)
@@ -107,7 +122,7 @@ def test_appointment_service():
             "patient_name": "Alice",
             "mobile": "9999999999",
             "doctor_name": "Dr. Rajesh Kumar",
-            "date": "2026-08-03",
+            "date": future_date,
             "time": "10:30"
         }
         book_res_2 = book_service.book_appointment(valid_create_2)
@@ -116,7 +131,7 @@ def test_appointment_service():
         print(f"Booked appointment for rescheduling: {appt_id_2}")
 
         # Reschedule it to 11:30 (free slot)
-        resched_res = appt_service.reschedule_appointment(appt_id_2, "2026-08-03", "11:30")
+        resched_res = appt_service.reschedule_appointment(appt_id_2, future_date, "11:30")
         print("Reschedule success response:", resched_res)
         assert resched_res["success"] is True
 
@@ -125,7 +140,7 @@ def test_appointment_service():
         resched_appt = status_res2["appointments"][0]
         print("Rescheduled Appointment Detail:", resched_appt)
         assert resched_appt["Status"] == "Rescheduled"
-        assert resched_appt["Date"] == "2026-08-03"
+        assert resched_appt["Date"] == future_date
         assert resched_appt["Time"] == "11:30"
         assert resched_appt["Updated At"] is not None
 
@@ -134,12 +149,12 @@ def test_appointment_service():
             "patient_name": "Charlie",
             "mobile": "7777777777",
             "doctor_name": "Dr. Rajesh Kumar",
-            "date": "2026-08-03",
+            "date": future_date,
             "time": "10:00"
         })
         # Try to reschedule Alice to 10:00 (booked by Charlie) (should fail with HTTPException 400)
         try:
-            appt_service.reschedule_appointment(appt_id_2, "2026-08-03", "10:00")
+            appt_service.reschedule_appointment(appt_id_2, future_date, "10:00")
             assert False, "Should have thrown HTTPException"
         except HTTPException as e:
             print("Successfully caught slot unavailable reschedule exception:", e.detail)
@@ -148,7 +163,7 @@ def test_appointment_service():
 
         # Try to reschedule cancelled Bob (should fail with HTTPException 400)
         try:
-            appt_service.reschedule_appointment(appt_id, "2026-08-03", "12:00")
+            appt_service.reschedule_appointment(appt_id, future_date, "12:00")
             assert False, "Should have thrown HTTPException"
         except HTTPException as e:
             print("Successfully caught reschedule cancelled exception:", e.detail)

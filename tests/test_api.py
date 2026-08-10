@@ -88,6 +88,22 @@ def test_fastapi_endpoints():
     app.dependency_overrides[get_db] = override_get_db
     client = TestClient(app)
 
+    # Compute a valid booking date dynamically
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from config import TIMEZONE, HOLIDAYS
+    
+    tz = ZoneInfo(TIMEZONE)
+    future_date = None
+    for i in range(1, 15):
+        d = datetime.now(tz) + timedelta(days=i)
+        date_str = d.strftime("%Y-%m-%d")
+        if date_str not in HOLIDAYS and d.weekday() in [0, 1, 2, 4]:
+            future_date = date_str
+            break
+    if not future_date:
+        future_date = "2026-08-17"
+
     try:
         # 1. Test /health
         print("\n--- 1. Testing GET /health ---")
@@ -163,7 +179,7 @@ def test_fastapi_endpoints():
 
         # 4. Test /api/v1/check-availability
         print("\n--- 4. Testing POST /api/v1/check-availability ---")
-        avail_payload = {"doctor_id": "D001", "date": "2026-08-03"}
+        avail_payload = {"doctor_id": "D001", "date": future_date}
         res = client.post("/api/v1/check-availability", json=avail_payload)
         print("Availability result:", res.json())
         assert res.status_code == 200
@@ -176,7 +192,7 @@ def test_fastapi_endpoints():
             "patient_name": "David",
             "mobile": "9998887776",
             "doctor_name": "Dr. Rajesh Kumar",
-            "date": "2026-08-03",
+            "date": future_date,
             "time": "10:30"
         }
         res = client.post("/api/v1/book-appointment", json=book_payload)
@@ -237,7 +253,7 @@ def test_fastapi_endpoints():
         print("\n--- 7. Testing POST /api/v1/reschedule-appointment ---")
         resched_payload = {
             "appointment_id": appt_id,
-            "new_date": "2026-08-03",
+            "new_date": future_date,
             "new_time": "12:00"
         }
         res = client.post("/api/v1/reschedule-appointment", json=resched_payload)

@@ -21,6 +21,21 @@ def test_booking_service():
     
     db = SessionClass()
 
+    # Compute a valid booking date dynamically
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    HOLIDAYS = ["2026-08-15", "2026-01-26", "2026-10-02", "2026-12-25"]
+    tz = ZoneInfo("Asia/Kolkata")
+    future_date = None
+    for i in range(1, 15):
+        d = datetime.now(tz) + timedelta(days=i)
+        date_str = d.strftime("%Y-%m-%d")
+        if date_str not in HOLIDAYS and d.weekday() in [0, 1, 2, 4]:
+            future_date = date_str
+            break
+    if not future_date:
+        future_date = "2026-08-17"
+
     try:
         # Seed doctors
         doc1 = Doctor(
@@ -42,7 +57,7 @@ def test_booking_service():
         # 1. Test Input Validation Failures
         print("\n--- 1. Testing Validation Failures ---")
         # Missing field (empty name)
-        bad_req1 = {"patient_name": "", "mobile": "123456", "doctor_name": "Dr. Rajesh Kumar", "date": "2026-08-03", "time": "09:00"}
+        bad_req1 = {"patient_name": "", "mobile": "123456", "doctor_name": "Dr. Rajesh Kumar", "date": future_date, "time": "09:00"}
         try:
             booking_service.book_appointment(bad_req1)
             assert False, "Should have thrown HTTPException for empty name"
@@ -60,7 +75,7 @@ def test_booking_service():
             assert e.status_code == 400
 
         # Non-existent doctor
-        bad_req3 = {"patient_name": "Akshay", "mobile": "9876543210", "doctor_name": "Dr. Strange", "date": "2026-08-03", "time": "09:00"}
+        bad_req3 = {"patient_name": "Akshay", "mobile": "9876543210", "doctor_name": "Dr. Strange", "date": future_date, "time": "09:00"}
         try:
             booking_service.book_appointment(bad_req3)
             assert False, "Should have thrown HTTPException for non-existent doctor"
@@ -74,7 +89,7 @@ def test_booking_service():
             "patient_name": "Akshay",
             "mobile": "9876543210",
             "doctor_name": "Dr. Rajesh Kumar",
-            "date": "2026-08-03",  # Monday
+            "date": future_date,  # Monday
             "time": "09:00"
         }
         res1 = booking_service.book_appointment(req1)
@@ -108,7 +123,7 @@ def test_booking_service():
             "patient_name": "Suresh",
             "mobile": "8888888888",
             "doctor_name": "Dr. Rajesh Kumar",
-            "date": "2026-08-03",
+            "date": future_date,
             "time": "09:00" # same slot
         }
         try:
@@ -126,7 +141,7 @@ def test_booking_service():
             "patient_name": "Suresh",
             "mobile": "8888888888",
             "doctor_name": "Dr. Rajesh Kumar",
-            "date": "2026-08-03",
+            "date": future_date,
             "time": "09:30" # next slot
         }
         res3 = booking_service.book_appointment(req3)

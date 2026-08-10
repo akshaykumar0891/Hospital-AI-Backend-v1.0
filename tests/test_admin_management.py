@@ -120,14 +120,13 @@ def test_admin_management_endpoints():
         assert res_delete.status_code == 200
         assert res_delete.json()["success"] is True
 
-        # Verify doctor is deleted and appointments associated with them are soft-cancelled
+        # Verify doctor is deleted and appointments associated with them are physically deleted
         db_check = TestingSessionLocal()
         try:
             doc = db_check.query(Doctor).filter(Doctor.doctor_id == "D001").first()
             assert doc is None
             appt = db_check.query(Appointment).filter(Appointment.appointment_id == "APT-000001").first()
-            assert appt.status == "Cancelled"
-            assert appt.cancelled_at is not None
+            assert appt is None
         finally:
             db_check.close()
 

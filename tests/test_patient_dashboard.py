@@ -133,16 +133,14 @@ def test_patient_dashboard_endpoints():
         assert res_delete.status_code == 200
         assert res_delete.json()["success"] is True
 
-        # Verify that David's appointments status are now "Cancelled" in the database
+        # Verify that David's appointments are physically deleted from the database
         db_check = TestingSessionLocal()
         try:
             david_appts = db_check.query(Appointment).filter(
                 Appointment.patient_name == "David",
                 Appointment.mobile == "9998887776"
             ).all()
-            for a in david_appts:
-                assert a.status == "Cancelled"
-                assert a.cancelled_at is not None
+            assert len(david_appts) == 0
         finally:
             db_check.close()
 
@@ -151,12 +149,12 @@ def test_patient_dashboard_endpoints():
         res_stats = client.get("/api/v1/dashboard/stats")
         print("Dashboard stats after deletion response:", res_stats.json())
         data = res_stats.json()["data"]
-        # David's 2 appointments are cancelled, so cancelled_appointments should be 2.
+        # David's 2 appointments are physically deleted, so cancelled_appointments should be 0.
         # Alice's 1 appointment is booked, so upcoming_appointments should be 1.
-        assert data["cancelled_appointments"] == 2
+        assert data["cancelled_appointments"] == 0
         assert data["upcoming_appointments"] == 1
-        # Patient count should still be 2 (David and Alice are still in history, just cancelled).
-        assert data["total_patients"] == 2
+        # Patient count should be 1 (David's appointments are physically deleted, so only Alice remains in history).
+        assert data["total_patients"] == 1
         # Estimated revenue should only count active bookings: Alice (1) * $100 = $100.
         assert data["estimated_revenue"] == 100
 
