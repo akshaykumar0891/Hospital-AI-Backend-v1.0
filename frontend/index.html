@@ -11,6 +11,10 @@
     <!-- FontAwesome Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="style.css">
+
+    <!-- Supabase config meta (fill these or provide env-config.js to set window.SUPABASE_URL / window.SUPABASE_KEY) -->
+    <meta name="supabase-url" content="">
+    <meta name="supabase-key" content="">
 </head>
 <body class="light-theme">
     <!-- App Container -->
@@ -559,7 +563,7 @@
             <div class="modal-content">
                 <p style="margin-bottom: 24px; font-size: 14.5px; line-height: 1.6; color: var(--text-primary);">
                     Are you sure you want to delete this doctor?<br><br>
-                    Deleting this doctor profile will <strong>permanently remove</strong> <strong style="color: var(--danger);" id="doc-confirm-name"></strong> (ID: <span id="doc-confirm-id"></span>) and <strong>cancel all their scheduled appointments</strong>.
+                    Deleting this doctor profile will <strong>permanently remove</strong> <strong style="color: var(--danger);" id="doc-confirm-name"></strong> (ID: <span id="doc-confirm-id"></span>) [...]
                 </p>
                 <div style="display: flex; justify-content: flex-end; gap: 12px;">
                     <button class="btn btn-secondary" id="cancel-doc-delete-btn">Cancel</button>
@@ -580,6 +584,23 @@
         <span id="toast-message">Action completed successfully.</span>
     </div>
     
+    <!-- Supabase JS (UMD build) -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+
+    <script>
+      // Initialize window.SUPABASE_* from meta tags if present.
+      (function(){
+        try {
+          const urlMeta = document.querySelector('meta[name="supabase-url"]');
+          const keyMeta = document.querySelector('meta[name="supabase-key"]');
+          if (urlMeta && keyMeta && urlMeta.content && keyMeta.content) {
+            window.SUPABASE_URL = urlMeta.content;
+            window.SUPABASE_KEY = keyMeta.content;
+          }
+        } catch(e) { console.warn('Failed to read supabase meta tags', e); }
+      })();
+    </script>
+
     <script src="script.js"></script>
 </body>
 </html>
