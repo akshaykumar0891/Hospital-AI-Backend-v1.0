@@ -20,6 +20,90 @@ let currentState = {
 // API Endpoints Prefix
 const API_PREFIX = "/api/v1";
 
+// ---- Supabase realtime setup ----
+let supabaseClient = null;
+let supabaseChannel = null;
+
+function readSupabaseFromMeta() {
+    try {
+        if (!window.SUPABASE_URL) {
+            const m = document.querySelector('meta[name="supabase-url"]');
+            if (m && m.content) window.SUPABASE_URL = m.content;
+        }
+        if (!window.SUPABASE_KEY) {
+            const k = document.querySelector('meta[name="supabase-key"]');
+            if (k && k.content) window.SUPABASE_KEY = k.content;
+        }
+    } catch (e) {
+        console.warn('[Supabase] reading meta tags failed', e);
+    }
+}
+
+function initSupabaseClient() {
+    readSupabaseFromMeta();
+
+    if (!window.SUPABASE_URL || !window.SUPABASE_KEY) {
+        console.warn('[Supabase] SUPABASE_URL or SUPABASE_KEY not set; realtime disabled.');
+        return;
+    }
+
+    try {
+        // `supabase` global is provided by the CDN UMD bundle included in index.html
+        supabaseClient = (typeof supabase !== 'undefined')
+            ? supabase.createClient(window.SUPABASE_URL, window.SUPABASE_KEY, { realtime: { params: { eventsPerSecond: 10 } } })
+            : null;
+
+        if (supabaseClient) console.log('[Supabase] client initialized');
+        else console.warn('[Supabase] supabase UMD not found on window');
+    } catch (err) {
+        console.error('[Supabase] failed to initialize client', err);
+        supabaseClient = null;
+    }
+}
+
+function setupSupabaseRealtime() {
+    if (!supabaseClient) return;
+
+    try {
+        // Clean up existing channel if present
+        if (supabaseChannel) {
+            try { supabaseClient.removeChannel(supabaseChannel); } catch(e){ /* ignore */ }
+            supabaseChannel = null;
+        }
+
+        supabaseChannel = supabaseClient
+            .channel('public:dashboard-changes')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments' }, payload => {
+                logger('[supabase] appointments change', payload);
+                // lightweight refresh for list views
+                fetchRecentAppointments();
+                fetchAppointments();
+            })
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'doctors' }, payload => {
+                logger('[supabase] doctors change', payload);
+                fetchDoctorsList();
+            })
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'patients' }, payload => {
+                logger('[supabase] patients change', payload);
+                fetchPatients();
+            })
+            .subscribe(({ status, error }) => {
+                console.log('[supabase] subscription status:', status, error || '');
+                if (status === 'SUBSCRIBED') {
+                    showToast('Realtime connected');
+                }
+                if (error) {
+                    console.error('[supabase] subscription error:', error);
+                }
+            });
+
+    } catch (err) {
+        console.error('[Supabase] failed to setup realtime', err);
+    }
+}
+
+// ---- end Supabase realtime setup ----
+
 // DOM Elements Mappings
 const DOM = {
     // Navigation & Global UI
@@ -136,6 +220,9 @@ document.addEventListener("DOMContentLoaded", () => {
     updateLiveDate();
     setupEventListeners();
     loadAllData(true);
+    // Initialize Supabase realtime after initial load
+    initSupabaseClient();
+    setupSupabaseRealtime();
     startAutoRefresh();
 });
 
@@ -321,7 +408,7 @@ function renderDoctorsGrid(doctors) {
                 <button class="btn btn-secondary" style="padding:6px 12px; font-size:12px; border-radius:6px; box-shadow:none;" onclick="triggerEditDoctor('${doc.doctor_id}')">
                     <i class="fa-solid fa-edit"></i> Edit
                 </button>
-                <button class="btn" style="padding:6px 12px; font-size:12px; border-radius:6px; background-color:var(--danger); color:white; box-shadow:none;" onclick="triggerDeleteDoctor('${doc.doctor_id}', '${doc.doctor_name.replace(/'/g, "\\'")}')">
+                <button class="btn" style="padding:6px 12px; font-size:12px; border-radius:6px; background-color:var(--danger); color:white; box-shadow:none;" onclick="triggerDeleteDoctor('${doc.doctor_id}','${(doc.doctor_name||'').replace(/'/g,"\\'")}")">
                     <i class="fa-solid fa-trash-can"></i> Delete
                 </button>
             </div>
@@ -371,7 +458,7 @@ function renderRecentTable(appointments) {
 }
 
 function getStatusBadgeClass(status) {
-    const s = status.toLowerCase();
+    const s = (status || '').toLowerCase();
     if (s === "booked") return "badge-booked";
     if (s === "cancelled") return "badge-cancelled";
     if (s === "rescheduled") return "badge-rescheduled";
