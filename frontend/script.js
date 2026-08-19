@@ -18,7 +18,11 @@ let currentState = {
 };
 
 // API Endpoints Prefix
-const API_PREFIX = "/api/v1";
+const API_PREFIX = window.location.origin.includes('localhost') || window.location.origin.includes('127.0.0.1')
+    ? "/api/v1"
+    : (window.location.origin.includes('hospital-ai-backend-v1-0.onrender.com')
+        ? "/api/v1"
+        : "https://hospital-ai-backend-v1-0.onrender.com/api/v1");
 
 // ---- Supabase realtime setup ----
 let supabaseClient = null;
@@ -39,7 +43,19 @@ function readSupabaseFromMeta() {
     }
 }
 
-function initSupabaseClient() {
+async function initSupabaseClient() {
+    // Fetch supabase configurations from backend dynamically
+    try {
+        const res = await fetch(`${API_PREFIX}/supabase-config`);
+        const json = await res.json();
+        if (json.success && json.data.supabase_url && json.data.supabase_key) {
+            window.SUPABASE_URL = json.data.supabase_url;
+            window.SUPABASE_KEY = json.data.supabase_key;
+        }
+    } catch (err) {
+        console.warn('[Supabase] failed to fetch config from backend', err);
+    }
+
     readSupabaseFromMeta();
 
     if (!window.SUPABASE_URL || !window.SUPABASE_KEY) {
@@ -53,7 +69,10 @@ function initSupabaseClient() {
             ? supabase.createClient(window.SUPABASE_URL, window.SUPABASE_KEY, { realtime: { params: { eventsPerSecond: 10 } } })
             : null;
 
-        if (supabaseClient) console.log('[Supabase] client initialized');
+        if (supabaseClient) {
+            console.log('[Supabase] client initialized');
+            setupSupabaseRealtime(); // Setup realtime immediately once client is ready
+        }
         else console.warn('[Supabase] supabase UMD not found on window');
     } catch (err) {
         console.error('[Supabase] failed to initialize client', err);
@@ -222,7 +241,6 @@ document.addEventListener("DOMContentLoaded", () => {
     loadAllData(true);
     // Initialize Supabase realtime after initial load
     initSupabaseClient();
-    setupSupabaseRealtime();
     startAutoRefresh();
 });
 

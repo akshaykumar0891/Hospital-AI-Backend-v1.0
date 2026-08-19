@@ -238,6 +238,33 @@ def system_info():
     }
 
 @app.get(
+    "/api/v1/supabase-config",
+    summary="Get Supabase Client configuration",
+    description="Exposes the Supabase URL and Anon Key for frontend realtime subscription.",
+    tags=["System Details"]
+)
+def get_supabase_config():
+    """Supabase configuration discovery endpoint."""
+    supabase_url = os.getenv("SUPABASE_URL", "")
+    if not supabase_url:
+        db_url = os.getenv("DATABASE_URL", "")
+        import re
+        match = re.search(r"@db\.([a-z0-9\-]+)\.supabase\.co", db_url)
+        if match:
+            ref_id = match.group(1)
+            supabase_url = f"https://{ref_id}.supabase.co"
+            
+    return {
+        "success": True,
+        "message": "Supabase configuration retrieved successfully",
+        "data": {
+            "supabase_url": supabase_url,
+            "supabase_key": os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY") or ""
+        },
+        "errors": []
+    }
+
+@app.get(
     "/health",
     summary="Verify API Health",
     description="Validates core database connection pools status, system environment, and calculates service uptime.",

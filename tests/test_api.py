@@ -138,6 +138,15 @@ def test_fastapi_endpoints():
         assert res.json()["data"]["service"] == "Hospital AI Backend"
         assert res.json()["data"]["database"] == "PostgreSQL"
 
+        # 3bc. Test /api/v1/supabase-config
+        print("\n--- 3bc. Testing GET /api/v1/supabase-config ---")
+        res = client.get("/api/v1/supabase-config")
+        print("Supabase config response:", res.json())
+        assert res.status_code == 200
+        assert res.json()["success"] is True
+        assert "supabase_url" in res.json()["data"]
+        assert "supabase_key" in res.json()["data"]
+
         # 3c. Test /api/v1/ai-capabilities
         print("\n--- 3c. Testing GET /api/v1/ai-capabilities ---")
         res = client.get("/api/v1/ai-capabilities")
